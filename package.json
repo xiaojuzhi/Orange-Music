@@ -1,0 +1,65 @@
+{
+  "name": "orange-music",
+  "productName": "Orange Music",
+  "version": "1.0.0",
+  "description": "Orange Music —— 纯本地运行的 Windows 桌面音乐播放器，支持多格式播放、逐字同步歌词、均衡器与音效、歌单与资料库管理。",
+  "main": "main.js",
+  "author": "Orange Music",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "electron",
+    "music-player",
+    "local-music",
+    "lyrics",
+    "flac",
+    "windows"
+  ],
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis",
+    "dist:cn": "set \"ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/\" && set \"ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/\" && electron-builder --win nsis",
+    "dist:dir": "electron-builder --win dir"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.orange.music.desktop",
+    "productName": "Orange Music",
+    "asar": false,
+    "artifactName": "Orange-Music-Setup-${version}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/app.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Orange Music"
+    }
+  }
+}
