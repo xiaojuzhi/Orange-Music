@@ -4,11 +4,26 @@ const LYRICS_KEYS = [
   'LYRICS', 'LYRIC', 'UNSYNCEDLYRICS', 'UNSYNCED LYRICS', 'UNSYNCHRONISEDLYRICS',
   'SYNCEDLYRICS', 'LRC', 'LYRICS_ENG', 'LYRICSZHO', '歌词', 'LYRICS-XXX'
 ];
+
+// MP4 / M4A 里承载标签的原子名 -> 统一字段名
+const MP4_TAG_ATOMS = {
+  '\u00a9nam': 'title',
+  '\u00a9ART': 'artist',
+  'aART': 'artist',
+  '\u00a9alb': 'album',
+  '\u00a9lyr': 'lyricsText',
+  'covr': 'artwork'
+};
+
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.OrangeTags = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+/**
+ * 按 BOM / 内容把字节流解码成文本。
+ * 顺序：UTF-16 BOM → UTF-8 BOM 剔除 → 严格 UTF-8 → GBK 兜底。
+ */
 function decodeTextBuffer(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
@@ -31,6 +46,10 @@ function decodeTextBuffer(buffer) {
   }
 }
 
+/**
+ * 在字节流中查找 ASCII 串（等价于 bytes.indexOf(text) 的字节版）。
+ * @returns {number} 首次出现的下标，找不到返回 -1
+ */
 function findBytes(bytes, text, from = 0, limit = 0) {
   const length = text.length;
   const end = limit ? Math.min(bytes.length, limit) : bytes.length;
@@ -44,6 +63,40 @@ function findBytes(bytes, text, from = 0, limit = 0) {
   return -1;
 }
 
+/** 从字节流里按小端读出 4 字节无符号整数 */
+function readUint32LE(bytes, offset) {
+  return (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
+}
+
+/** 从字节流里按大端读出 4 字节无符号整数（MP4 原子长度为大端） */
+function readUint32BE(bytes, offset) {
+  return ((bytes[offset] << 24) >>> 0) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3];
+}
+
+// MP3 帧头查表（避免在循环里反复新建数组）
+const MP3_BITRATES = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+const MP3_SAMPLE_RATES = [44100, 48000, 32000, 0];
+
+/**
+ * 解析 FLAC 文件头的 STREAMINFO 块（固定为第一个元数据块）。
+ * 位域排布：采样率 20bit | 声道数 3bit | 位深 5bit | 总样本数 36bit。
+ * @returns {{sampleRate:number, channels:number, bits:number, totalSamples:number} | null}
+ */
+function parseFlacStreamInfo(bytes) {
+  const p = 8; // 跳过 4 字节 'fLaC' + 4 字节块头
+  if (bytes.length < p + 34) return null;
+  return {
+    sampleRate: (bytes[p + 10] << 12) | (bytes[p + 11] << 4) | (bytes[p + 12] >> 4),
+    channels: ((bytes[p + 12] >> 1) & 0x07) + 1,
+    bits: (((bytes[p + 12] & 0x01) << 4) | (bytes[p + 13] >> 4)) + 1,
+    totalSamples: ((bytes[p + 13] & 0x0f) * 4294967296) + readUint32BE(bytes, p + 14)
+  };
+}
+
+/**
+ * 解析 Vorbis Comment 块（FLAC / OGG / Opus 通用）。
+ * 结构：4 字节 vendor 长度 + vendor + 4 字节条目数 + N ×(4 字节长度 + KEY=VALUE)
+ */
 function parseVorbisComment(bytes, offset) {
   const result = {};
   if (offset < 0 || offset + 4 > bytes.length) return result;
@@ -86,28 +139,31 @@ function parseVorbisComment(bytes, offset) {
   return result;
 }
 
+/** FLAC / OGG / Opus 标签，包含封面与歌词 */
 async function readVorbisTags(file) {
   if (!/\.(flac|ogg|oga|opus)$/i.test(file.name)) return {};
   const bytes = new Uint8Array(await file.slice(0, 8 * 1024 * 1024).arrayBuffer());
   const result = {};
   const isFlac = String.fromCharCode(...bytes.subarray(0, 4)) === 'fLaC';
   if (isFlac) {
+    // FLAC：遍历元数据块，type 4 = VORBIS_COMMENT，type 6 = PICTURE
     let p = 4;
     while (p + 4 <= bytes.length) {
       const flag = bytes[p];
       const length = (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3];
       const type = flag & 0x7f;
       const block = bytes.subarray(p + 4, p + 4 + length);
-      if (type === 4) Object.assign(result, parseVorbisComment(block, 0), result);
+      if (type === 4) Object.assign(result, parseVorbisComment(block, 0));
       if (type === 6 && !result.artwork) {
         const url = pictureBlockToUrl(block);
         if (url) result.artwork = url;
       }
-      if (flag & 0x80) break;
+      if (flag & 0x80) break; // 最高位为 1 表示最后一个块
       p += 4 + length;
     }
     return result;
   }
+  // OGG / Opus：先找 OpusTags，再找 vorbis 注释头
   let offset = findBytes(bytes, 'OpusTags');
   if (offset >= 0) offset += 8;
   else {
@@ -115,38 +171,32 @@ async function readVorbisTags(file) {
     if (offset >= 0) offset += 7;
   }
   if (offset < 0) return {};
-  return Object.assign(result, parseVorbisComment(bytes, offset));
+  return parseVorbisComment(bytes, offset);
 }
 
+/** MP4 / M4A 原子：©nam 标题、©ART 歌手、©alb 专辑、©lyr 歌词、covr 封面 */
 async function readMp4Tags(file) {
   if (!/\.(m4a|mp4|aac|alac)$/i.test(file.name)) return {};
   const bytes = new Uint8Array(await file.slice(0, 8 * 1024 * 1024).arrayBuffer());
-  const TAGS = {
-    '\u00a9nam': 'title',
-    '\u00a9ART': 'artist',
-    'aART': 'artist',
-    '\u00a9alb': 'album',
-    '\u00a9lyr': 'lyricsText',
-    'covr': 'artwork'
-  };
   const result = {};
   // 单次扫描所有需要的原子，避免对大文件反复全文搜索
   for (let i = 4; i + 4 <= bytes.length; i += 1) {
     const first = bytes[i];
     if (first !== 0xa9 && first !== 0x61 && first !== 0x63) continue;
     const fourcc = String.fromCharCode(first, bytes[i + 1], bytes[i + 2], bytes[i + 3]);
-    const key = TAGS[fourcc];
+    const key = MP4_TAG_ATOMS[fourcc];
     if (!key || result[key]) continue;
+    // 原子后面紧跟一个 'data' 子原子，限制在 96 字节内查找
     const dataAt = findBytes(bytes, 'data', i + 4, i + 96);
     if (dataAt < 4) continue;
-    const dataSize = ((bytes[dataAt - 4] << 24) >>> 0) + (bytes[dataAt - 3] << 16) + (bytes[dataAt - 2] << 8) + bytes[dataAt - 1];
-    const dataType = ((bytes[dataAt + 4] << 24) >>> 0) + (bytes[dataAt + 5] << 16) + (bytes[dataAt + 6] << 8) + bytes[dataAt + 7];
+    const dataSize = readUint32BE(bytes, dataAt - 4);
+    const dataType = readUint32BE(bytes, dataAt + 4);
     const payloadStart = dataAt + 12;
     const payloadEnd = dataSize ? Math.min(dataAt - 4 + dataSize, bytes.length) : bytes.length;
     if (payloadStart >= payloadEnd) continue;
     const payload = bytes.subarray(payloadStart, payloadEnd);
     if (key === 'artwork') {
-      result.artwork = imageBytesToDataUrl(payload, dataType === 14 ? 'image/png' : 'image/jpeg');
+      result.artwork = bytesToDataUrl(payload, dataType === 14 ? 'image/png' : 'image/jpeg');
     } else {
       const value = decodeTextBuffer(payload).replace(/\0/g, '').trim();
       if (value) result[key] = value;
@@ -155,6 +205,7 @@ async function readMp4Tags(file) {
   return result;
 }
 
+/** WAV 的 RIFF INFO 标签（INAM / IART / IPRD） */
 async function readWavTags(file) {
   if (!/\.wav$/i.test(file.name)) return {};
   const bytes = new Uint8Array(await file.slice(0, 2 * 1024 * 1024).arrayBuffer());
@@ -162,7 +213,7 @@ async function readWavTags(file) {
   const readChunk = fourcc => {
     const at = findBytes(bytes, fourcc);
     if (at < 0) return '';
-    const size = bytes[at + 4] | (bytes[at + 5] << 8) | (bytes[at + 6] << 16) | (bytes[at + 7] << 24);
+    const size = readUint32LE(bytes, at + 4);
     if (size <= 0 || at + 8 + size > bytes.length) return '';
     return decodeTextBuffer(bytes.subarray(at + 8, at + 8 + size)).replace(/\0/g, '').trim();
   };
@@ -171,6 +222,11 @@ async function readWavTags(file) {
   return result;
 }
 
+/**
+ * ID3 SYLT：同步歌词帧（自带时间戳）。
+ * 头部 6 字节为 编码 + 语言(3) + 时间戳格式 + 内容类型，其后是
+ * [文本 + 0 终止符][4 字节时间戳] 的重复序列。
+ */
 function parseSyncLyrics(raw) {
   const encoding = raw[0];
   const timed = [];
@@ -186,13 +242,17 @@ function parseSyncLyrics(raw) {
     const text = decodeTextBuffer(raw.subarray(p, textEnd)).trim();
     const timeStart = textEnd + width;
     if (timeStart + 4 > raw.length) break;
-    const stamp = (raw[timeStart] << 24) | (raw[timeStart + 1] << 16) | (raw[timeStart + 2] << 8) | raw[timeStart + 3];
+    const stamp = readUint32BE(raw, timeStart);
     if (text) timed.push({ time: Math.max(0, stamp) / 1000, text });
     p = timeStart + 4;
   }
   return timed.sort((a, b) => a.time - b.time);
 }
 
+/**
+ * ID3 TXXX：形如「描述\0值」的用户自定义文本，部分音乐把歌词放在这里。
+ * @returns {{description: string, lyrics?: string, value?: string} | null}
+ */
 function parseUserTextFrame(raw, decodedValue) {
   const encoding = raw[0];
   const payload = raw.subarray(1);
@@ -208,8 +268,7 @@ function parseUserTextFrame(raw, decodedValue) {
   if (split < 0) return null;
   const description = decodeTextBuffer(payload.subarray(0, split)).replace(/\0/g, '').trim().toUpperCase();
   const value = decodeTextBuffer(payload.subarray(split + width)).replace(/\0/g, '').trim() || decodedValue || '';
-  const lyricKeys = LYRICS_KEYS;
-  if (lyricKeys.includes(description)) return { description, lyrics: value };
+  if (LYRICS_KEYS.includes(description)) return { description, lyrics: value };
   return { description, value };
 }
 
@@ -217,40 +276,43 @@ function parseUserTextFrame(raw, decodedValue) {
 function parseId3Block(bytes, result) {
   if (bytes.length < 10 || String.fromCharCode(bytes[0], bytes[1], bytes[2]) !== 'ID3') return result;
   const version = bytes[3];
+  // ID3v2 头部长度用「同步安全整数」编码：每字节只有低 7 位有效
   const size = ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f);
   const end = Math.min(10 + size, bytes.length);
   return parseId3Frames(bytes, 10, end, version, result);
 }
 
+/** 逐个解析 ID3v2 帧，把命中的字段写进 result */
 function parseId3Frames(bytes, start, end, version, result) {
-  let offset = 10;
-  offset = start;
-  const ascii = (at, length) => String.fromCharCode(...bytes.slice(at, at + length));
+  let offset = start;
   while (offset + 10 <= end) {
-    const frameId = ascii(offset,4);
+    const frameId = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
     if (!/^[A-Z0-9]{4}$/.test(frameId)) break;
-    let frameSize = version === 4
-      ? ((bytes[offset+4] & 0x7f) << 21) | ((bytes[offset+5] & 0x7f) << 14) | ((bytes[offset+6] & 0x7f) << 7) | (bytes[offset+7] & 0x7f)
-      : ((bytes[offset+4] << 24) >>> 0) + (bytes[offset+5] << 16) + (bytes[offset+6] << 8) + bytes[offset+7];
+    // v2.4 的帧长同样是同步安全整数；v2.2 / v2.3 是普通大端整数
+    const frameSize = version === 4
+      ? ((bytes[offset + 4] & 0x7f) << 21) | ((bytes[offset + 5] & 0x7f) << 14) | ((bytes[offset + 6] & 0x7f) << 7) | (bytes[offset + 7] & 0x7f)
+      : readUint32BE(bytes, offset + 4);
     if (frameSize <= 0 || offset + 10 + frameSize > bytes.length) break;
+
     const encoding = bytes[offset + 10];
-    const rawPayload = bytes.slice(offset + 10, offset + 10 + frameSize);
-    const payload = bytes.slice(offset + 11, offset + 10 + frameSize);
+    const rawPayload = bytes.subarray(offset + 10, offset + 10 + frameSize);
+    const payload = bytes.subarray(offset + 11, offset + 10 + frameSize);
     let value = '';
     try {
-      if (encoding === 1 || encoding === 2) {
-        value = new TextDecoder(encoding === 1 ? 'utf-16' : 'utf-16be').decode(payload).replace(/\0/g,'');
-      } else {
-        value = new TextDecoder(encoding === 3 ? 'utf-8' : 'windows-1252').decode(payload).replace(/\0/g,'');
-      }
+      const decoder = encoding === 1 || encoding === 2
+        ? new TextDecoder(encoding === 1 ? 'utf-16' : 'utf-16be')
+        : new TextDecoder(encoding === 3 ? 'utf-8' : 'windows-1252');
+      value = decoder.decode(payload).replace(/\0/g, '');
     } catch {}
+
     if (frameId === 'APIC' || frameId === 'PIC') {
       const artwork = parseAttachedPicture(rawPayload, frameId);
       if (artwork) result.artwork = artwork;
     }
     if (frameId === 'USLT') {
+      // USLT 结构：编码(1) + 语言(3) + 内容描述(以 0 结尾) + 歌词正文
       const lyricEncoding = rawPayload[0];
-      let lyricPos = 4;
+      const lyricPos = 4;
       let lyricEnd = -1;
       if (lyricEncoding === 1 || lyricEncoding === 2) {
         for (let i = lyricPos; i < rawPayload.length - 1; i += 2) {
@@ -283,21 +345,23 @@ function parseId3Frames(bytes, start, end, version, result) {
   return result;
 }
 
+/** MP3 的 ID3v2 标签（含尾部标签兜底扫描） */
 async function readId3(file) {
   if (!/\.mp3$/i.test(file.name)) return {};
+  const fileSize = Number(file.size) || 0;
   const head = new Uint8Array(await file.slice(0, 10).arrayBuffer());
   const result = {};
   const hasHeadTag = head.length >= 10 && String.fromCharCode(head[0], head[1], head[2]) === 'ID3';
   if (hasHeadTag) {
     const tagSize = ((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f);
-    const readLimit = Math.min(10 + tagSize + 16, 16 * 1024 * 1024);
+    const readLimit = Math.min(10 + tagSize + 16, 16 * 1024 * 1024, fileSize || Infinity);
     const bytes = new Uint8Array(await file.slice(0, readLimit).arrayBuffer());
     parseId3Block(bytes, result);
   }
   // 有些工具把 ID3v2 标签写在文件末尾，再补一次尾部扫描
-  if (!result.lyricsText && !result.lyrics && (file.size || bytes.length) > 128) {
-    const tailSize = Math.min(4 * 1024 * 1024, file.size);
-    const tail = new Uint8Array(await file.slice(file.size - tailSize).arrayBuffer());
+  if (!result.lyricsText && !result.lyrics && fileSize > 128) {
+    const tailSize = Math.min(4 * 1024 * 1024, fileSize);
+    const tail = new Uint8Array(await file.slice(fileSize - tailSize).arrayBuffer());
     const at = findBytes(tail, 'ID3');
     if (at >= 0) {
       const tailed = {};
@@ -311,7 +375,8 @@ async function readId3(file) {
   return result;
 }
 
-function imageBytesToDataUrl(bytes, mime) {
+/** 把图片字节转成 data: URL（分块拼接，避免超长参数把调用栈打爆） */
+function bytesToDataUrl(bytes, mime = 'image/jpeg') {
   let binary = '';
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
@@ -320,6 +385,7 @@ function imageBytesToDataUrl(bytes, mime) {
   return `data:${mime || 'image/jpeg'};base64,${btoa(binary)}`;
 }
 
+/** 解析 ID3 的 APIC（v2.3+）/ PIC（v2.2）帧，返回封面 data: URL */
 function parseAttachedPicture(raw, frameId) {
   if (!raw || raw.length < 8) return '';
   const encoding = raw[0];
@@ -327,17 +393,17 @@ function parseAttachedPicture(raw, frameId) {
   let mime = 'image/jpeg';
 
   if (frameId === 'PIC') {
-    const format = String.fromCharCode(...raw.slice(position, position + 3)).toUpperCase();
+    const format = String.fromCharCode(...raw.subarray(position, position + 3)).toUpperCase();
     position += 3;
     mime = format === 'PNG' ? 'image/png' : 'image/jpeg';
   } else {
     const mimeEnd = raw.indexOf(0, position);
     if (mimeEnd < 0) return '';
-    mime = String.fromCharCode(...raw.slice(position, mimeEnd)) || 'image/jpeg';
+    mime = String.fromCharCode(...raw.subarray(position, mimeEnd)) || 'image/jpeg';
     position = mimeEnd + 1;
   }
 
-  position += 1;
+  position += 1; // 跳过图片类型字节
   let descriptionEnd = -1;
   if (encoding === 1 || encoding === 2) {
     for (let i = position; i < raw.length - 1; i += 2) {
@@ -350,34 +416,34 @@ function parseAttachedPicture(raw, frameId) {
     descriptionEnd = raw.indexOf(0, position) + 1;
   }
   if (descriptionEnd <= position) descriptionEnd = position;
-  const image = raw.slice(descriptionEnd);
-  return image.length ? imageBytesToDataUrl(image, mime) : '';
+  const image = raw.subarray(descriptionEnd);
+  return image.length ? bytesToDataUrl(image, mime) : '';
 }
 
-function bytesToDataUrl(bytes, mime) {
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  return `data:${mime};base64,${btoa(binary)}`;
-}
-
+/** FLAC 的 METADATA_BLOCK_PICTURE 结构 -> data: URL */
 function pictureBlockToUrl(block) {
   if (block.length < 32) return '';
-  let p = 0;
+  let p = 4; // 跳过图片类型（4 字节）
+  const mimeLength = readUint32BE(block, p);
   p += 4;
-  const mimeLength = (block[p] << 24) | (block[p+1] << 16) | (block[p+2] << 8) | block[p+3];
-  p += 4;
+  if (p + mimeLength + 4 > block.length) return '';
   const mime = String.fromCharCode(...block.subarray(p, p + mimeLength));
   p += mimeLength;
-  const descLength = (block[p] << 24) | (block[p+1] << 16) | (block[p+2] << 8) | block[p+3];
-  p += 4 + descLength;
-  p += 16;
-  const dataLength = (block[p] << 24) | (block[p+1] << 16) | (block[p+2] << 8) | block[p+3];
+  const descLength = readUint32BE(block, p);
+  p += 4 + descLength + 16; // 跳过描述与宽/高/深/色数（各 4 字节）
+  if (p + 4 > block.length) return '';
+  const dataLength = readUint32BE(block, p);
   p += 4;
   const image = block.subarray(p, p + dataLength);
   return image.length ? bytesToDataUrl(image, mime || 'image/jpeg') : '';
 }
 
+/**
+ * 解析 LRC 文本为 [{ time, text, words? }]。
+ * 支持：标准 [mm:ss.xx]、多时间标签一行多唱、逐字卡拉OK（<mm:ss.xx> 或行内多时间）、
+ * [offset:] 全局偏移、纯文本无时间轴（按每行 5 秒铺开）。
+ * 时间轴为空时返回按行生成的兜底时间轴，保证歌词界面仍可滚动。
+ */
 function parseLyrics(text) {
   const lines = String(text).replace(/\r/g,'').split('\n');
   const timed = [];
@@ -440,6 +506,21 @@ function parseLyrics(text) {
   if (offset) {
     deduped.forEach(line => { line.time = Math.max(0, line.time - offset); });
   }
+  // 双语歌词：原文一行、译文一行，两行**共用同一个时间戳**
+  // （网易云 / QQ 音乐导出的翻译 LRC 基本都是这个写法）。
+  // 这里把「时间戳和前一行完全相同」的那行标记成 translation —— 解析层只负责打标，
+  // 不做取舍，显不显示交给上层按偏好决定，这样开关切换不用重新解析歌词。
+  // 排序用的是 Array.prototype.sort（V8 起稳定排序），同一时间戳的多行会保持文件里的
+  // 先后顺序，而原文总写在译文前面，所以「保留第一个、标记后面的」是安全的。
+  let previousTime = null;
+  deduped.forEach(line => {
+    if (line.text === '♪') return;              // 纯时间戳的空行是间隔，不参与判断
+    if (previousTime !== null && Math.abs(line.time - previousTime) < 1e-3) {
+      line.translation = true;
+      return;                                   // 译文行不更新基准时间，连着几行译文也能全标上
+    }
+    previousTime = line.time;
+  });
   return deduped;
 }
 
@@ -471,30 +552,25 @@ async function readDuration(file, filePath) {
   return 0;
 }
 
+/** Ogg / FLAC / Opus 时长：优先用 STREAMINFO，其次用最后一页的 granule 位置 */
 async function readVorbisDuration(file, name) {
   const bytes = new Uint8Array(await file.slice(0, 64 * 1024).arrayBuffer());
   if (String.fromCharCode(...bytes.subarray(0, 4)) === 'fLaC') {
-    // 第一个元数据块必须是 STREAMINFO（34 字节）
-    if (bytes.length < 4 + 4 + 34) return 0;
-    const p = 8;
-    const sampleRate = (bytes[p + 10] << 12) | (bytes[p + 11] << 4) | (bytes[p + 12] >> 4);
-    const total = ((bytes[p + 13] & 0x0f) * 4294967296)
-      + (((bytes[p + 14] << 24) >>> 0) + (bytes[p + 15] << 16) + (bytes[p + 16] << 8) + bytes[p + 17]);
-    return sampleRate ? total / sampleRate : 0;
+    const info = parseFlacStreamInfo(bytes);
+    return info && info.sampleRate ? info.totalSamples / info.sampleRate : 0;
   }
-  // Ogg：最后一页的 granule position / 采样率
+  // Ogg：时长 = 最后一页的 granule position / 采样率
   const tail = new Uint8Array(await file.slice(Math.max(0, (file.size || bytes.length) - 65536)).arrayBuffer());
-  let rate = 48000;
-  const ident = findBytes(bytes, 'OpusHead');
-  if (ident >= 0) rate = 48000;
-  else if (findBytes(bytes, '\u0001vorbis') >= 0) {
-    const v = findBytes(bytes, '\u0001vorbis');
-    rate = (bytes[v + 12]) | (bytes[v + 13] << 8) | (bytes[v + 14] << 16) | (bytes[v + 15] << 24);
-  }
+  const opusHead = findBytes(bytes, 'OpusHead');
+  const vorbisHead = opusHead >= 0 ? -1 : findBytes(bytes, '\u0001vorbis');
+  // Opus 固定 48kHz；Vorbis 采样率写在标识头里
+  const rate = opusHead >= 0
+    ? 48000
+    : (vorbisHead >= 0 ? readUint32LE(bytes, vorbisHead + 12) : 48000);
   for (let i = tail.length - 14; i >= 0; i -= 1) {
     if (tail[i] === 0x4f && tail[i + 1] === 0x67 && tail[i + 2] === 0x67 && tail[i + 3] === 0x53) {
-      const low = (tail[i + 6] | (tail[i + 7] << 8) | (tail[i + 8] << 16) | (tail[i + 9] << 24)) >>> 0;
-      const high = (tail[i + 10] | (tail[i + 11] << 8) | (tail[i + 12] << 16) | (tail[i + 13] << 24)) >>> 0;
+      const low = readUint32LE(tail, i + 6);
+      const high = readUint32LE(tail, i + 10);
       const granule = high * 4294967296 + low;
       if (rate && granule) return granule / rate;
     }
@@ -502,6 +578,7 @@ async function readVorbisDuration(file, name) {
   return 0;
 }
 
+/** WAV 时长 = data 块字节数 / 字节率 */
 async function readWavDuration(file) {
   const bytes = new Uint8Array(await file.slice(0, 1024 * 1024).arrayBuffer());
   if (String.fromCharCode(...bytes.subarray(0, 4)) !== 'RIFF') return 0;
@@ -509,77 +586,69 @@ async function readWavDuration(file) {
   const data = findBytes(bytes, 'data');
   if (fmt < 0 || data < 0) return 0;
   // fmt 块：0-3 'fmt '，4-7 块大小，8-9 编码，10-11 声道，12-15 采样率，16-19 字节率
-  const byteRate = bytes[fmt + 16] | (bytes[fmt + 17] << 8) | (bytes[fmt + 18] << 16) | (bytes[fmt + 19] << 24);
-  const dataSize = (bytes[data + 4] | (bytes[data + 5] << 8) | (bytes[data + 6] << 16) | (bytes[data + 7] << 24)) >>> 0;
+  const byteRate = readUint32LE(bytes, fmt + 16);
+  const dataSize = readUint32LE(bytes, data + 4);
   return byteRate ? dataSize / byteRate : 0;
 }
 
+/** MP4 / M4A 时长：读 mvhd 盒的 timescale 与 duration（大端，v0/v1 两套偏移） */
 async function readMp4Duration(file) {
   const bytes = new Uint8Array(await file.slice(0, 4 * 1024 * 1024).arrayBuffer());
   const at = findBytes(bytes, 'mvhd');
   if (at < 0) return 0;
   const version = bytes[at + 4];
-  if (version === 1) {
-    const timescale = ((bytes[at + 24] << 24) >>> 0) + (bytes[at + 25] << 16) + (bytes[at + 26] << 8) + bytes[at + 27];
-    const duration = ((bytes[at + 28] << 24) >>> 0) + (bytes[at + 29] << 16) + (bytes[at + 30] << 8) + bytes[at + 31];
-    return timescale ? duration / timescale : 0;
-  }
-  const timescale = ((bytes[at + 16] << 24) >>> 0) + (bytes[at + 17] << 16) + (bytes[at + 18] << 8) + bytes[at + 19];
-  const duration = ((bytes[at + 20] << 24) >>> 0) + (bytes[at + 21] << 16) + (bytes[at + 22] << 8) + bytes[at + 23];
+  const offset = version === 1 ? 24 : 16;
+  const timescale = readUint32BE(bytes, at + offset);
+  const duration = readUint32BE(bytes, at + offset + 4);
   return timescale ? duration / timescale : 0;
 }
 
+/** MP3 时长：CBR 估算 = 音频字节数 × 8 / 比特率 */
 async function readMp3Duration(file) {
   const head = new Uint8Array(await file.slice(0, 16 * 1024).arrayBuffer());
   let offset = 0;
   if (String.fromCharCode(...head.subarray(0, 3)) === 'ID3') {
     offset = 10 + (((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f));
   }
-  const bitrates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
-  const rates = [44100, 48000, 32000, 0];
   for (let i = offset; i + 4 < head.length; i += 1) {
     if (head[i] !== 0xff || (head[i + 1] & 0xe0) !== 0xe0) continue;
     const versionBits = (head[i + 1] >> 3) & 0x03;
     const layerBits = (head[i + 1] >> 1) & 0x03;
     if (versionBits === 1 || layerBits === 0) continue;
-    const bitrateIndex = (head[i + 2] >> 4) & 0x0f;
+    const bitrate = MP3_BITRATES[(head[i + 2] >> 4) & 0x0f];
     const rateIndex = (head[i + 2] >> 2) & 0x03;
-    const bitrate = bitrates[bitrateIndex];
-    if (!bitrate || !rates[rateIndex]) continue;
-    const size = file.size || head.length;
-    const audioBytes = Math.max(0, size - offset);
+    if (!bitrate || !MP3_SAMPLE_RATES[rateIndex]) continue;
+    const audioBytes = Math.max(0, (Number(file.size) || head.length) - offset);
     return (audioBytes * 8) / (bitrate * 1000);
   }
   return 0;
 }
 
-// 读取技术参数：采样率 / 声道 / 位深（用于详情面板）
+/** 读取技术参数：采样率 / 声道 / 位深（用于详情面板） */
 async function readTechInfo(file, filePath) {
   const name = file?.name || filePath || '';
   try {
     if (/\.(flac|ogg|oga|opus)$/i.test(name)) {
       const bytes = new Uint8Array(await file.slice(0, 64 * 1024).arrayBuffer());
       if (String.fromCharCode(...bytes.subarray(0, 4)) === 'fLaC') {
-        const p = 8;
-        const sampleRate = (bytes[p + 10] << 12) | (bytes[p + 11] << 4) | (bytes[p + 12] >> 4);
-        const channels = ((bytes[p + 12] >> 1) & 0x07) + 1;
-        const bits = (((bytes[p + 12] & 0x01) << 4) | (bytes[p + 13] >> 4)) + 1;
-        return { sampleRate, channels, bits };
+        const info = parseFlacStreamInfo(bytes);
+        if (info) return { sampleRate: info.sampleRate, channels: info.channels, bits: info.bits };
       }
-      const head = findBytes(bytes, 'OpusHead');
-      if (head >= 0) return { sampleRate: 48000, channels: bytes[head + 9] || 2, bits: 16 };
-      const v = findBytes(bytes, '\u0001vorbis');
-      if (v >= 0) {
-        return { channels: bytes[v + 11] || 2, sampleRate: (bytes[v + 12] | (bytes[v + 13] << 8) | (bytes[v + 14] << 16) | (bytes[v + 15] << 24)) };
+      const opusHead = findBytes(bytes, 'OpusHead');
+      if (opusHead >= 0) return { sampleRate: 48000, channels: bytes[opusHead + 9] || 2, bits: 16 };
+      const vorbisHead = findBytes(bytes, '\u0001vorbis');
+      if (vorbisHead >= 0) {
+        return { channels: bytes[vorbisHead + 11] || 2, sampleRate: readUint32LE(bytes, vorbisHead + 12) };
       }
     }
     if (/\.wav$/i.test(name)) {
       const bytes = new Uint8Array(await file.slice(0, 4096).arrayBuffer());
       const fmt = findBytes(bytes, 'fmt ');
       if (fmt >= 0) {
+        // fmt 块：声道在 10-11，采样率在 12-15，位深在 22-23
         return {
           channels: bytes[fmt + 10] | (bytes[fmt + 11] << 8),
-          sampleRate: bytes[fmt + 12] | (bytes[fmt + 13] << 8) | (bytes[fmt + 14] << 16) | (bytes[fmt + 15] << 24),
+          sampleRate: readUint32LE(bytes, fmt + 12),
           bits: bytes[fmt + 22] | (bytes[fmt + 23] << 8)
         };
       }
@@ -590,10 +659,12 @@ async function readTechInfo(file, filePath) {
         if (bytes[i] !== 0xff || (bytes[i + 1] & 0xe0) !== 0xe0) continue;
         const versionBits = (bytes[i + 1] >> 3) & 0x03;
         const rateIndex = (bytes[i + 2] >> 2) & 0x03;
-        const rates = [44100, 48000, 32000, 0];
+        // MPEG1 / 2 / 2.5 的采样率缩放系数
         const scale = versionBits === 3 ? 1 : (versionBits === 2 ? .5 : .25);
         const channels = ((bytes[i + 3] >> 6) & 0x03) === 3 ? 1 : 2;
-        if (rates[rateIndex]) return { sampleRate: Math.round(rates[rateIndex] * scale), channels, bits: 16 };
+        if (MP3_SAMPLE_RATES[rateIndex]) {
+          return { sampleRate: Math.round(MP3_SAMPLE_RATES[rateIndex] * scale), channels, bits: 16 };
+        }
       }
     }
   } catch (error) {}
@@ -610,7 +681,6 @@ async function readTechInfo(file, filePath) {
     parseSyncLyrics,
     parseUserTextFrame,
     readId3,
-    imageBytesToDataUrl,
     parseAttachedPicture,
     bytesToDataUrl,
     pictureBlockToUrl,

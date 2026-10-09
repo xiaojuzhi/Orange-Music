@@ -47,6 +47,10 @@
     <symbol id="i-nav-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7.6"/><path d="M12 8.3V12l2.5 1.6"/></symbol>
     <symbol id="i-nav-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.8v2.2"/><path d="M12 18v2.2"/><path d="M4.8 12H7"/><path d="M17 12h2.2"/><path d="m6.9 6.9 1.6 1.6"/><path d="m15.5 15.5 1.6 1.6"/><path d="m17.1 6.9-1.6 1.6"/><path d="m8.5 15.5-1.6 1.6"/></symbol>
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6.5 7l.8 11a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9L17.5 7"/><path d="M9.5 7V5.2a1.2 1.2 0 0 1 1.2-1.2h2.6a1.2 1.2 0 0 1 1.2 1.2V7"/></symbol>
+    <symbol id="i-tilt-left" viewBox="0 0 24 24"><path d="M21 6H10L3 9v6l7 3h11z"/></symbol>
+    <symbol id="i-tilt-right" viewBox="0 0 24 24"><path d="M3 6h11l7 3v6l-7 3H3z"/></symbol>
+    <symbol id="i-ambient" viewBox="0 0 24 24"><circle cx="9.4" cy="12" r="3.2"/><path d="M9.4 6.4a5.6 5.6 0 0 1 0 11.2"/><path d="M9.4 2.6a9.4 9.4 0 0 1 0 18.8"/></symbol>
+    <symbol id="i-ambient-left" viewBox="0 0 24 24"><circle cx="14.6" cy="12" r="3.2"/><path d="M14.6 6.4a5.6 5.6 0 0 0 0 11.2"/><path d="M14.6 2.6a9.4 9.4 0 0 0 0 18.8"/></symbol>
   </svg>
 
   <header class="titlebar" id="titlebar">
@@ -354,6 +358,34 @@
               <span><strong>非当前行模糊</strong><small>让当前歌词更突出</small></span>
               <span class="range-wrap"><input id="lyricBlur" class="range-input" type="range" min="0" max="4" step="0.5" value="0" /><output id="lyricBlurValue">0 px</output></span>
             </label>
+            <label class="setting-row"><span><strong>显示翻译歌词</strong><small>双语歌词默认只显示原文；打开后把译文行也一起显示（译文与原文共用同一个时间戳）</small></span><input type="checkbox" class="switch" id="lyricTranslationToggle" /></label>
+            <label class="setting-row"><span><strong>歌词倾斜 + 字后字影</strong><small>歌词整体斜着显示；每句歌词背后都压着一层影子，当前行最重、其余行更浅（光从左上打来）</small></span><input type="checkbox" class="switch" id="tiltLyricsToggle" /></label>
+            <label class="setting-row"><span><strong>封面区倾斜 + 投影</strong><small>歌词界面里的封面、歌名与播放控件整体倾斜</small></span><input type="checkbox" class="switch" id="tiltStageToggle" /></label>
+            <label class="setting-row">
+              <span><strong>倾斜角度</strong><small>上面两个效果共用的立体倾斜幅度</small></span>
+              <span class="range-wrap"><input id="tiltAngle" class="range-input" type="range" min="0" max="35" step="1" value="25" /><output id="tiltAngleValue">25°</output></span>
+            </label>
+            <label class="setting-row">
+              <span><strong>歌词倾斜方向</strong><small>右侧向后倒 / 左侧向后倒</small></span>
+              <select id="tiltLyricsDir" class="select-input">
+                <option value="right">右侧向后</option>
+                <option value="left">左侧向后</option>
+              </select>
+            </label>
+            <label class="setting-row">
+              <span><strong>封面区倾斜方向</strong><small>右侧向后倒 / 左侧向后倒</small></span>
+              <select id="tiltStageDir" class="select-input">
+                <option value="right">右侧向后</option>
+                <option value="left">左侧向后</option>
+              </select>
+            </label>
+            <label class="setting-row"><span><strong>右侧氛围灯</strong><small>歌词右侧漫一片跟着封面主题色走的柔雾，会随音乐的低频一起涨缩呼吸（换歌自动换色）</small></span><input type="checkbox" class="switch" id="ambientLightToggle" /></label>
+            <label class="setting-row"><span><strong>左侧氛围灯</strong><small>在歌词左边再对称漫一片同样的柔雾，和右侧同色同步、一起随低频涨缩（可单独关掉）</small></span><input type="checkbox" class="switch" id="ambientLeftToggle" /></label>
+            <label class="setting-row"><span><strong>闪光跃动</strong><small>让柔雾跟着低音鼓点明显起伏：鼓点一到，雾从边缘大幅张开并提亮，节律感强。关闭时是原来那版柔和的缓慢呼吸</small></span><input type="checkbox" class="switch" id="ambientFlashToggle" /></label>
+            <label class="setting-row">
+              <span><strong>动态强度</strong><small>柔雾跟着音乐起伏的幅度。无级可调，100% 为标准，往左更含蓄、往右更澎湃，0% 基本不动；配合「闪光跃动」可以调出很强的鼓点张缩</small></span>
+              <span class="range-wrap"><input id="ambientPower" class="range-input" type="range" min="0" max="180" step="5" value="100" /><output id="ambientPowerValue">100%</output></span>
+            </label>
             <label class="setting-row">
               <span><strong>歌词界面配色</strong><small>深色 / 浅色 / 跟随封面颜色</small></span>
               <select id="lyricTheme" class="select-input">
@@ -375,6 +407,36 @@
             <button type="button" class="theme-swatch" data-theme="lilac"><i></i><span>藕荷</span></button>
             <button type="button" class="theme-swatch" data-theme="lemon"><i></i><span>柠檬</span></button>
             <button type="button" class="theme-swatch" data-theme="sakura"><i></i><span>樱花</span></button>
+            <button type="button" class="theme-swatch" data-theme="custom"><i></i><span>自定义</span></button>
+          </div>
+          <!-- 自定义色盘：只在选中「自定义」时展开，主色一定，整套浅色调跟着推导 -->
+          <div class="theme-picker" id="themePicker" hidden>
+            <div class="theme-picker-top">
+              <div class="color-wheel" id="colorWheel" role="slider" tabindex="0" aria-label="色盘：拖动选择主色" aria-valuemin="0" aria-valuemax="359" aria-valuenow="5">
+                <span class="color-wheel-core" id="colorWheelCore"></span>
+                <span class="color-wheel-knob" id="colorWheelKnob"></span>
+              </div>
+              <div class="color-picker-meta">
+                <div class="color-picker-value">
+                  <span class="color-dot" id="themeColorDot"></span>
+                  <input class="color-hex" id="themeHexInput" type="text" spellcheck="false" maxlength="7" value="#e84b3c" aria-label="十六进制颜色值" />
+                </div>
+                <p class="color-picker-hint">在色盘上拖动挑主色，底色、面板与边线会自动跟着一起变。</p>
+                <button type="button" class="button secondary small" id="themeResetBtn">恢复默认色</button>
+              </div>
+            </div>
+            <div class="theme-picker-fields">
+              <label class="picker-row"><span>主色明暗</span><span class="range-wrap"><input class="range-input" id="themeLight" type="range" min="26" max="76" step="1" value="57" /><output id="themeLightValue">57%</output></span></label>
+              <label class="picker-row"><span>界面着色</span><span class="range-wrap"><input class="range-input" id="themeTint" type="range" min="0" max="100" step="1" value="62" /><output id="themeTintValue">62%</output></span></label>
+              <div class="theme-mini-preview" id="themeMiniPreview" aria-hidden="true">
+                <span data-theme-role="bg" title="底色"></span>
+                <span data-theme-role="surface" title="面板"></span>
+                <span data-theme-role="surface2" title="浅面板"></span>
+                <span data-theme-role="line" title="边线"></span>
+                <span data-theme-role="deep" title="深色"></span>
+                <span data-theme-role="accent" title="主色"></span>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -533,6 +595,18 @@
   <div class="full-player" id="fullPlayer" aria-hidden="true">
     <div class="drag-strip" id="lyricsDragStrip" aria-hidden="true"></div>
     <button class="icon-button light full-back" data-action="collapse-player" aria-label="返回"><svg class="icon" style="transform: rotate(180deg);"><use href="#i-chevron-right"/></svg></button>
+    <!-- 氛围灯层：左右两片雾都挂在这里 —— 它是 .full-player 的直接子元素，
+         所以两片雾的百分比一律以**整个窗口**为基准。
+         ⚠️ 千万别挪回 .full-stage 或 .full-info 里：
+         `.full-player > *` 给了 .full-stage 一条 position: relative，它会成为包含块；
+         而 .full-stage 有 max-width: 1680px 且 margin: 0 auto 居中 ——
+         窗口一宽，它自己就往中间缩、还带着雾一起缩。实测：窗口 1895px 是极限，
+         再宽左雾就开始离开窗口左边，2560px 时偏出 332px（全屏后左边不贴边就是这么来的）。
+         挂在这一层上就与窗口宽度无关了，左右两片还互为严格镜像。 -->
+    <div class="ambient-layer" aria-hidden="true">
+      <div class="lyrics-ambient" id="lyricsAmbient"><div class="ambient-fog"><i class="ambient-puff p1"></i><i class="ambient-puff p2"></i><i class="ambient-puff p3"></i></div></div>
+      <div class="lyrics-ambient ambient-left" id="lyricsAmbientLeft"><div class="ambient-fog"><i class="ambient-puff p1"></i><i class="ambient-puff p2"></i><i class="ambient-puff p3"></i></div></div>
+    </div>
     <div class="full-stage">
       <div class="full-art-wrap">
         <div class="full-cover-shell">
@@ -584,13 +658,74 @@
           <svg class="icon"><use href="#i-chevron-right"/></svg>回到当前
         </button>
         <div class="lyric-menu" id="lyricMenu" hidden>
-          <div class="lyric-menu-head">歌词时间微调 <span id="lyricMenuOffset">0.00 秒</span></div>
-          <button type="button" data-lyric-adjust="0.25"><svg class="icon"><use href="#i-chevron-right"/></svg>歌词提前 0.25 秒</button>
-          <button type="button" data-lyric-adjust="-0.25"><svg class="icon"><use href="#i-chevron-right"/></svg>歌词延后 0.25 秒</button>
-          <div class="lyric-menu-tip">提示：调好后只对这首歌生效，会自动记住</div>
-          <button type="button" data-lyric-action="reset">重置这首歌的微调</button>
-          <button type="button" data-lyric-action="apply-all">把当前值应用到所有歌曲</button>
-          <button type="button" data-lyric-action="close">关闭菜单</button>
+          <div class="lyric-menu-group">歌词显示效果</div>
+          <div class="lyric-menu-row">
+            <button type="button" class="lyric-menu-switch" data-lyric-toggle="tiltLyrics" aria-pressed="false">
+              <svg class="icon"><use href="#i-audio-lines"/></svg>
+              <span class="lyric-menu-name" title="歌词整体斜着显示；每句歌词背后都压着一层影子，当前行最重、其余行更浅（光从左上打来）">歌词倾斜</span>
+              <span class="lyric-switch-track"><i></i></span>
+            </button>
+            <span class="lyric-dir-seg">
+              <button type="button" data-lyric-dir="tiltLyricsDir" data-dir="right" title="右侧向后倒">右后</button>
+              <button type="button" data-lyric-dir="tiltLyricsDir" data-dir="left" title="左侧向后倒">左后</button>
+            </span>
+          </div>
+          <div class="lyric-menu-row">
+            <button type="button" class="lyric-menu-switch" data-lyric-toggle="tiltStage" aria-pressed="false">
+              <svg class="icon"><use href="#i-disc"/></svg>
+              <span class="lyric-menu-name" title="歌词界面里的封面、歌名与播放控件整体倾斜">封面区倾斜</span>
+              <span class="lyric-switch-track"><i></i></span>
+            </button>
+            <span class="lyric-dir-seg">
+              <button type="button" data-lyric-dir="tiltStageDir" data-dir="right" title="右侧向后倒">右后</button>
+              <button type="button" data-lyric-dir="tiltStageDir" data-dir="left" title="左侧向后倒">左后</button>
+            </span>
+          </div>
+          <div class="lyric-menu-row">
+            <button type="button" class="lyric-menu-switch" data-lyric-toggle="ambientLight" aria-pressed="true">
+              <svg class="icon"><use href="#i-ambient"/></svg>
+              <span class="lyric-menu-name" title="歌词右侧漫一片跟着封面主题色走的柔雾，会随音乐的低频一起涨缩呼吸">右侧氛围灯</span>
+              <span class="lyric-switch-track"><i></i></span>
+            </button>
+          </div>
+          <div class="lyric-menu-row">
+            <button type="button" class="lyric-menu-switch" data-lyric-toggle="ambientLeft" aria-pressed="true">
+              <svg class="icon"><use href="#i-ambient-left"/></svg>
+              <span class="lyric-menu-name" title="在歌词左边再对称漫一片同样的柔雾，和右侧同色同步、一起随低频涨缩">左侧氛围灯</span>
+              <span class="lyric-switch-track"><i></i></span>
+            </button>
+          </div>
+          <div class="lyric-menu-row">
+            <button type="button" class="lyric-menu-switch" data-lyric-toggle="ambientFlash" aria-pressed="false">
+              <svg class="icon"><use href="#i-audio-lines"/></svg>
+              <span class="lyric-menu-name" title="让柔雾跟着低音鼓点明显起伏：鼓点一到，雾从边缘大幅张开并提亮。关闭时是原来那版柔和的缓慢呼吸">闪光跃动</span>
+              <span class="lyric-switch-track"><i></i></span>
+            </button>
+          </div>
+          <div class="lyric-menu-row ambient-power-row" id="lyricMenuAmbientPowerRow">
+            <span class="lyric-menu-name" title="柔雾跟着音乐起伏的幅度。往左更含蓄，往右更澎湃，0% 基本不动；配合「闪光跃动」可以调出很强的鼓点张缩">动态强度</span>
+            <output class="ambient-power-value" id="lyricMenuAmbientPower">标准 100%</output>
+          </div>
+          <div class="lyric-menu-row ambient-power-slider" id="lyricMenuAmbientPowerSlider">
+            <input type="range" class="ambient-power-range" id="lyricMenuAmbientRange" min="0" max="180" step="5" value="100" aria-label="氛围灯动态强度" />
+          </div>
+          <div class="lyric-menu-row">
+            <button type="button" class="lyric-menu-switch" data-lyric-toggle="lyricTranslation" aria-pressed="false">
+              <svg class="icon"><use href="#i-lyrics"/></svg>
+              <span class="lyric-menu-name" title="双语歌词默认只显示原文，打开后连译文一起显示">显示翻译</span>
+              <span class="lyric-switch-track"><i></i></span>
+            </button>
+          </div>
+          <div class="lyric-menu-group">歌词时间微调 <span id="lyricMenuOffset">0.00 秒</span></div>
+          <div class="lyric-menu-row">
+            <button type="button" data-lyric-adjust="0.25" title="歌词提前 0.25 秒">提前 0.25s</button>
+            <button type="button" data-lyric-adjust="-0.25" title="歌词延后 0.25 秒">延后 0.25s</button>
+          </div>
+          <div class="lyric-menu-row">
+            <button type="button" data-lyric-action="reset" title="只对这首歌生效，会自动记住">重置</button>
+            <button type="button" data-lyric-action="apply-all" title="把当前微调值套用到所有歌曲">应用到全部</button>
+          </div>
+          <button type="button" class="lyric-menu-close" data-lyric-action="close">关闭菜单</button>
         </div>
       </div>
     </div>

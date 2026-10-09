@@ -1,6 +1,6 @@
 # Orange Music · 本地音乐播放器
 
-一个 Windows 桌面本地音乐播放器，界面参考 Apple Music，纯本地运行、不联网。
+一个纯本地运行的 Windows 桌面音乐播放器：支持 MP3 / FLAC / AAC / WAV / OGG 等常见格式，自动读取标签与封面；歌词逐字同步，内置十段均衡器与音量均衡，支持多歌单与资料库自动扫描，还带托盘控制、全局快捷键和可自定义的界面配色。
 用 Electron + 原生 HTML / CSS / JavaScript 写成，没有前端框架依赖。
 
 ![歌曲列表](docs/screenshots/歌曲列表.png)

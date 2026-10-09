@@ -637,6 +637,13 @@ body.dark .playlist-cover .playlist-symbol { background: #28313d; }
 }
 .switch:checked { background: var(--green); }
 .switch:checked::after { transform: translateX(19px); }
+/* 底部播放浮窗内部的次要文字与图标配色。
+   浮窗是半透明模糊面板，背后是任意专辑封面：压到深色封面上时，面板实际背景
+   会从浅灰一路掉到中灰，这时全局 --muted(#86868b) 的对比度只剩 1.3~2.0，
+   文字和细线图标会直接糊进背景。因此浮窗内部单独使用 --bar-muted。 */
+body { --bar-muted: color-mix(in srgb, var(--ink) 78%, var(--muted)); }
+body.dark { --bar-muted: color-mix(in srgb, var(--ink) 30%, var(--muted)); }
+
 .mini-player {
   position: fixed;
   z-index: 40;
@@ -657,8 +664,8 @@ body.dark .playlist-cover .playlist-symbol { background: #28313d; }
 .mini-title { min-width: 0; }
 .mini-title strong, .mini-title span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mini-title strong { font-size: 14px; }
-.mini-title span { color: var(--muted); font-size: 12px; }
-.mini-track .heart-button { margin-left: auto; color: var(--muted); }
+.mini-title span { color: var(--bar-muted); font-size: 12px; }
+.mini-track .heart-button { margin-left: auto; color: var(--bar-muted); }
 .mini-track .heart-button.active { color: var(--accent); }
 .mini-track .heart-button.active .icon { fill: currentColor; }
 .mini-center { min-width: 0; }
@@ -688,7 +695,7 @@ body.dark .playlist-cover .playlist-symbol { background: #28313d; }
 }
 .play-main:hover { transform: scale(1.06); }
 .play-main .icon { width: 19px; height: 19px; }
-.seek-row { display: grid; grid-template-columns: 42px 1fr 42px; align-items: center; gap: 9px; margin-top: 4px; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.seek-row { display: grid; grid-template-columns: 42px 1fr 42px; align-items: center; gap: 9px; margin-top: 4px; color: var(--bar-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .seek-row span:last-child { text-align: right; }
 input[type="range"] {
   appearance: none;
@@ -711,7 +718,7 @@ input[type="range"]::-webkit-slider-thumb {
 input[type="range"]:hover::-webkit-slider-thumb { opacity: 1; }
 input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 2px solid var(--surface); border-radius: 50%; background: var(--accent); }
 .mini-tools { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
-.mini-tools > .icon-button { color: var(--muted); }
+.mini-tools > .icon-button { color: var(--bar-muted); }
 .volume-control { display: flex; align-items: center; gap: 7px; }
 .volume-control input { width: 78px; }
 .full-player {
@@ -2339,6 +2346,144 @@ body.theme-sakura {
 .theme-swatch[data-theme="lemon"] i { --sw-bg: #fbf7e9; --sw-accent: #c99012; }
 .theme-swatch[data-theme="sakura"] i { --sw-bg: #fdf0f4; --sw-accent: #d9527f; }
 
+/* --------------------------------------------------------------------------
+   主题颜色 · 自定义色盘
+   —— 色盘只选一个「主色」，底色 / 面板 / 边线由 JS 按同一色相推导后写进
+      html.theme-custom / body.theme-custom 的自定义变量里（连带把页面背景
+      从 --surface 改读 --bg），所以这里只需要管控件外观。
+   -------------------------------------------------------------------------- */
+.theme-picker {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 22px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+.theme-picker[hidden] { display: none; }
+.theme-picker-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 20px;
+}
+/* 色相环：conic-gradient 负责色相（0° 在右侧、顺时针递增），
+   中心叠一层白色径向渐变，半径即饱和度 —— 越靠外越艳。 */
+.color-wheel {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  flex: none;
+  border-radius: 50%;
+  cursor: crosshair;
+  touch-action: none;
+  background: conic-gradient(from 90deg,
+    hsl(0 100% 50%), hsl(30 100% 50%), hsl(60 100% 50%), hsl(90 100% 50%),
+    hsl(120 100% 50%), hsl(150 100% 50%), hsl(180 100% 50%), hsl(210 100% 50%),
+    hsl(240 100% 50%), hsl(270 100% 50%), hsl(300 100% 50%), hsl(330 100% 50%),
+    hsl(360 100% 50%));
+  box-shadow: 0 8px 22px rgba(20, 24, 31, .16), inset 0 0 0 1px rgba(20, 24, 31, .08);
+}
+.color-wheel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle closest-side, #fff 0%, rgba(255, 255, 255, .88) 26%, rgba(255, 255, 255, 0) 88%);
+}
+.color-wheel:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset: 3px; }
+/* 拖动手柄：位置由 JS 按「色相 = 角度、饱和度 = 半径」写 left/top（映射 44%） */
+.color-wheel-knob {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, .32);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.color-wheel-core {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .18);
+  pointer-events: none;
+}
+.color-picker-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 216px;
+}
+.color-picker-value {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+.color-picker-value:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.color-dot {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(20, 24, 31, .14);
+}
+.color-hex {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: 600 13px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.color-hex:focus { outline: none; }
+.color-picker-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.theme-picker-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-width: 260px;
+}
+.picker-row { display: flex; align-items: center; gap: 14px; }
+.picker-row > span:first-child {
+  flex: none;
+  width: 66px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.picker-row .range-wrap { flex: 1; width: auto; }
+.picker-row .range-input { width: 100%; }
+.theme-mini-preview { display: flex; gap: 6px; }
+.theme-mini-preview span {
+  flex: 1;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid rgba(20, 24, 31, .1);
+  transition: background .18s ease;
+}
+
 /* 侧边栏选中态与图标跟随主题色 */
 .icon-button.danger:hover { color: var(--accent); }
 
@@ -2507,9 +2652,12 @@ body.theme-sakura {
   display: inline-block;
   color: inherit;
   transition: color .26s var(--ease);
-  will-change: transform, color;
 }
-.lyric-line.active .ch { color: rgba(228, 236, 231, .3); }
+/* will-change 只留给「当前句」的字（下面那条），不再写在所有字上。
+   原来每个 <span> 都被提升成独立合成层：一首歌逐字拆下来就是几千个 span，
+   双语歌词（原文 + 译文各一行）再翻一倍 —— 合成器每帧都要把这几千层过一遍，
+   滚动卡顿就是从这里来的。真正会动 transform 的只有当前句那几十个字。 */
+.lyric-line.active .ch { will-change: transform, color; color: rgba(228, 236, 231, .3); }
 .lyric-line.active .ch.on { color: #fff; animation: ch-idle 3.8s ease-in-out infinite; }
 .lyric-line.active .ch.pop { animation: ch-pop .5s var(--ease); }
 @keyframes ch-pop {
@@ -2524,11 +2672,11 @@ body.theme-sakura {
 .full-player.lyric-light .lyric-line.active .ch { color: rgba(38, 42, 48, .26); }
 .full-player.lyric-light .lyric-line.active .ch.on { color: #1d1d1f; }
 
-/* 手动滚动后出现的「回到当前」 */
+/* 歌词区右键菜单 */
 .lyric-menu {
   position: fixed;
   z-index: 90;
-  min-width: 250px;
+  min-width: 272px;
   padding: 8px;
   border: 1px solid rgba(255, 255, 255, .16);
   border-radius: 14px;
@@ -2544,23 +2692,34 @@ body.theme-sakura {
   from { opacity: 0; transform: translateY(-4px) scale(.98); }
   to { opacity: 1; transform: none; }
 }
-.lyric-menu-head {
+/* 分组小标题 */
+.lyric-menu-group {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 6px 10px 8px;
-  color: rgba(244, 244, 245, .6);
-  font-size: 12px;
+  padding: 7px 10px 5px;
+  color: rgba(244, 244, 245, .48);
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: .04em;
 }
-.lyric-menu-head span { color: #fff; font-variant-numeric: tabular-nums; }
+.lyric-menu-group span { color: #fff; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+
+/* 一行装「开关 + 方向分段」或「两个并列小按钮」 */
+.lyric-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.lyric-menu-row > button { flex: 1; min-width: 0; }
+
 .lyric-menu button {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   width: 100%;
-  padding: 9px 10px;
+  padding: 8px 10px;
   border: 0;
   border-radius: 9px;
   background: transparent;
@@ -2568,21 +2727,125 @@ body.theme-sakura {
   font-size: 13px;
   text-align: left;
   cursor: pointer;
+  transition: background .15s ease, color .15s ease;
 }
 .lyric-menu button:hover { background: rgba(255, 255, 255, .12); }
-.lyric-menu button .icon { width: 14px; height: 14px; color: rgba(244, 244, 245, .7); }
-.lyric-menu button[data-lyric-adjust="0.25"] .icon { transform: rotate(-90deg); }
-.lyric-menu button[data-lyric-adjust="-0.25"] .icon { transform: rotate(90deg); }
-.lyric-menu-tip {
-  padding: 8px 10px 4px;
-  color: rgba(244, 244, 245, .45);
+.lyric-menu button .icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: rgba(244, 244, 245, .55);
+  transition: color .15s ease;
+}
+.lyric-menu-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(244, 244, 245, .82);
+}
+
+/* 开关小滑块 */
+.lyric-switch-track {
+  flex: none;
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .16);
+  transition: background .18s ease;
+}
+.lyric-switch-track i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .82);
+  transition: transform .18s var(--ease-out), background .18s ease;
+}
+.lyric-menu button.active { background: rgba(255, 255, 255, .07); }
+.lyric-menu button.active .icon { color: var(--accent); }
+.lyric-menu button.active .lyric-menu-name { color: #fff; }
+.lyric-menu button.active .lyric-switch-track { background: color-mix(in srgb, var(--accent) 78%, transparent); }
+.lyric-menu button.active .lyric-switch-track i { background: #fff; transform: translateX(12px); }
+
+/* 方向分段：右后 / 左后 */
+.lyric-dir-seg {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .07);
+  transition: opacity .18s ease;
+}
+/* 所属效果没打开时整段弱化，避免误以为已经生效 */
+.lyric-menu-row.off .lyric-dir-seg { opacity: .4; }
+.lyric-dir-seg > button {
+  width: auto;
+  justify-content: center;
+  padding: 4px 7px;
+  border-radius: 6px;
   font-size: 11px;
-  line-height: 1.5;
+  line-height: 1.35;
+  white-space: nowrap;
+  color: rgba(244, 244, 245, .5);
 }
-.lyric-menu button[data-lyric-action] {
-  color: rgba(244, 244, 245, .78);
+.lyric-dir-seg > button:hover { background: rgba(255, 255, 255, .1); color: rgba(244, 244, 245, .88); }
+.lyric-dir-seg > button.active {
+  background: rgba(255, 255, 255, .18);
+  color: #fff;
+  font-weight: 600;
+}
+/* 氛围灯动态强度：菜单里的无级滑块（标题+数值一行，滑块单独一行铺满） */
+.lyric-menu-row.ambient-power-row { padding: 1px 10px 0; }
+.ambient-power-value {
+  flex: none;
+  color: #fff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.lyric-menu-row.ambient-power-slider { padding: 3px 10px 7px; }
+.ambient-power-range {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  height: 4px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  background: transparent;
+}
+/* 两片氛围灯都关掉时整组弱化，跟上面的方向分段一个意思 */
+.lyric-menu-row.off .ambient-power-range { opacity: .4; }
+.lyric-menu-row.off .ambient-power-value { opacity: .45; }
+
+/* 并列的操作小按钮 */
+.lyric-menu-row > button:not(.lyric-menu-switch) {
+  justify-content: center;
+  padding: 7px 8px;
+  background: rgba(255, 255, 255, .06);
+  color: rgba(244, 244, 245, .76);
   font-size: 12px;
+  text-align: center;
 }
+.lyric-menu-row > button:not(.lyric-menu-switch):hover { background: rgba(255, 255, 255, .14); color: #fff; }
+
+.lyric-menu .lyric-menu-close {
+  justify-content: center;
+  margin-top: 6px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 9px;
+  color: rgba(244, 244, 245, .45);
+  font-size: 12px;
+  text-align: center;
+}
+.lyric-menu .lyric-menu-close:hover { background: rgba(255, 255, 255, .1); color: #fff; }
 
 .lyrics-back-current {
   position: absolute;
@@ -2866,7 +3129,7 @@ body.density-compact .queue-row { padding-top: 4px; padding-bottom: 4px; }
 .feature-tag { color: color-mix(in srgb, var(--accent) 58%, #ffffff); }
 .feature-tag .icon { color: currentColor; }
 :root {
-  /* Apple Music 风格的基础色板 */
+  /* 基础色板 */
   --bg: #f5f5f7;
   --surface: #ffffff;
   --surface-2: #f0f0f3;
@@ -2885,4 +3148,370 @@ body.density-compact .queue-row { padding-top: 4px; padding-bottom: 4px; }
   --ease: cubic-bezier(.32, .72, 0, 1);
   --ease-out: cubic-bezier(.16, 1, .3, 1);
   --player-h: 88px;
+}
+
+/* ==========================================================================
+   歌词界面「立体向内倾斜 + 投影」效果
+   body.tilt-lyrics / body.tilt-stage 由设置页与歌词右键菜单控制；
+   两个类都不存在时，下面的规则完全不生效，原有歌词效果不受影响。
+   --tilt-angle 是倾斜幅度，--lyric-dir / --stage-dir 是方向：
+   +1 = 右侧向后倒，-1 = 左侧向后倒（在 #fullPlayer 上由脚本设置）。
+   ========================================================================== */
+
+/* 倾斜或氛围灯开启时放开 .full-stage 的裁切。
+   .full-stage 自带 overflow: hidden，而它的左边缘正好和左栏内容的起点重合
+   （.full-art-wrap 是 align-items: flex-start），左栏完全贴边、没有任何余量。
+   3D 倾斜会让「近边」在透视下向外扩出去 —— 25° 时每侧约 20~45px，方向是
+   「右侧向后倒」时近边正好在左边 —— 于是封面、歌名、进度条的左侧被硬切掉一条。
+   氛围灯（历史遗留）：雾以前挂在 .full-stage 里，需要这层放开才不会被切。
+   现在两片雾都挪到 .full-player 下的 .ambient-layer 里了，不再依赖这条；
+   两个开关选择器保留着当兜底，删掉也不会影响副作用。
+   放开这层裁切即可：外层 .full-player 仍是 overflow: hidden，
+   而它的左右内边距 clamp(28px, 5vw, 96px) 始终大于外扩量，不会溢出窗口。 */
+body.tilt-lyrics .full-player .full-stage,
+body.tilt-stage .full-player .full-stage,
+body.ambient-light .full-player .full-stage,
+body.ambient-left .full-player .full-stage { overflow: visible; }
+
+body.tilt-lyrics .full-player .lyrics-scroll {
+  transform: perspective(900px) rotateY(calc(var(--tilt-angle, 25deg) * var(--lyric-dir, 1)));
+  transform-origin: 50% 50%;
+}
+/* 「字后模糊的影」：每一行歌词后面都压着一块，浓淡由「当前行 / 其他行」两档决定。
+   做法是在文字背后压一份「同一句话的副本」，做偏移 + 放大 + 模糊 ——
+   影子跟着文字轮廓走，而不是一条生硬的矩形光条。
+   为什么用伪元素复制文字而不是给 .lyric-line 加 text-shadow：
+   text-shadow 是贴着笔画上色的，字边缘会糊出一圈毛边，看起来就是「字发糊」；
+   副本层在 z-index:-1，笔画本身一个像素都不受影响，永远锐利。
+   方向默认 translate(6px, 6px)：光从左上角来、影落右下。
+   --lyric-glow-* 变量留着调参，改数值不用动结构。 */
+body.tilt-lyrics .full-player .lyric-line {
+  position: relative;
+  z-index: 0;
+}
+body.tilt-lyrics .full-player .lyric-line::before {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  /* 不写这行，副本会整体错开一个行内上内边距，影子就浮到字上面去了 */
+  padding: inherit;
+  z-index: -1;
+  /* 影子的颜色是一块固定的「影子色」，不再跟着字色走（原来是 currentColor）。
+     跟着字色走的问题：当前行字是纯白 → 影子也是白的，那其实是一团发光的雾，
+     不是影子；而且封面背景一浅，白影就糊得看不见了。
+     #262422 炭灰：比背景暗一档、带一点暖调，接近自然光下环境光反弹后的投影；
+     不用纯黑是因为纯黑会把画面压出死气，现实里的影子总还留一点环境光。
+     --lyric-glow-color 留着调参，换色不用动结构。 */
+  color: var(--lyric-glow-color, #262422);
+  opacity: var(--lyric-glow-idle, .42);
+  filter: blur(var(--lyric-glow-blur, 3px));
+  transform:
+    translate(var(--lyric-glow-x, 6px), var(--lyric-glow-y, 6px))
+    scale(var(--lyric-glow-scale, 1.08));
+  /* 缩放原点放「左中」而不是正中：非当前行是左对齐的长句，整行宽度可能有
+     650px，按正中缩放会把影子整体往左推 4% 行宽（约 26px），
+     看起来就变成「光从右边来」了。放左中才是所有行口径一致。 */
+  transform-origin: 0% 50%;
+  pointer-events: none;
+  transition: opacity .36s var(--ease);
+}
+/* 当前行：文字纯白加亮，影子也压到最重 */
+body.tilt-lyrics .full-player .lyric-line.active {
+  width: fit-content;
+  max-width: 100%;
+  color: #fff;
+  text-shadow: none;
+}
+body.tilt-lyrics .full-player .lyric-line.active::before { opacity: var(--lyric-glow-active, .6); }
+/* 当前行里还没唱到的字也提亮一档，压在影子前才看得清 */
+body.tilt-lyrics .full-player .lyric-line.active .ch { color: rgba(255, 255, 255, .42); }
+body.tilt-lyrics .full-player .lyric-line.active .ch.on { color: #fff; }
+/* 浅色歌词界面：影色不用另配 —— 炭灰影在浅底上本来就成立，
+   但白底的明暗对比比深底强得多，所以浓度要收一档，免得压出脏印子。 */
+body.tilt-lyrics .full-player.lyric-light .lyric-line.active { color: #17181b; }
+body.tilt-lyrics .full-player.lyric-light .lyric-line.active .ch { color: rgba(23, 24, 27, .34); }
+body.tilt-lyrics .full-player.lyric-light .lyric-line.active .ch.on { color: #17181b; }
+body.tilt-lyrics .full-player.lyric-light .lyric-line::before {
+  opacity: var(--lyric-glow-idle-light, .28);
+}
+body.tilt-lyrics .full-player.lyric-light .lyric-line.active::before {
+  opacity: var(--lyric-glow-active-light, .44);
+}
+
+body.tilt-stage .full-player .full-art-wrap {
+  transform: perspective(900px) rotateY(calc(var(--tilt-angle, 25deg) * var(--stage-dir, 1)));
+  transform-origin: 50% 50%;
+  filter:
+    drop-shadow(0 0 46px color-mix(in srgb, var(--cover-accent, var(--accent)) 46%, transparent))
+    drop-shadow(0 22px 46px rgba(0, 0, 0, .4));
+}
+body.tilt-stage .full-player.lyric-light .full-art-wrap {
+  filter: drop-shadow(0 24px 40px rgba(0, 0, 0, .18));
+}
+
+/* 菜单里开关与方向分段的样式已并入上面的 .lyric-menu 区块 */
+
+/* ==========================================================================
+   歌词界面「氛围灯」：左右各一片跟封面主题色同色的柔雾，跟着音乐的低频涨缩。
+   body.ambient-light 管右侧那片、body.ambient-left 管左侧那片，各自由设置页开关
+   与歌词右键菜单控制；类不存在时 display: none，
+   完全零开销，也不会影响上面那套歌词倾斜 + 字后阴影。
+
+   颜色取 --cover-accent —— applyCoverAccent() 从封面提出的主色（已统一提亮到
+   l ≥ 62%），所以换歌自动换色，这里不用再配一套。
+
+   为什么要真的一层 filter: blur()：
+   光靠 radial-gradient 做不出雾 —— 渐变是「一个圆里颜色变淡」，三团叠在一起
+   就是三个发光球，边界一眼能看出来。必须是「几个色团先摆好、整体再过一次
+   大半径高斯模糊」，让三团的边缘互相吃掉、连成一片，才叫雾。
+
+   那模糊会不会因为跟着鼓点动就每帧重算？不会 ——
+   模糊放在中间那层 .ambient-fog 上，它的内容**永远不变**（三个色团是静止的），
+   涨缩 / 平移 / 浓淡分别由外层三层各自承担，都是合成器操作：
+       .lyrics-ambient  恒定 opacity + 缓慢漂移（CSS animation）
+       .ambient-fog     改 scale(sx, sy)（低频驱动，横向为主纵向为辅）
+       .ambient-puff    永远不动 —— 所以模糊结果可以一直复用，不算第二遍。
+
+   左右两片：右侧那片（#lyricsAmbient）和左侧那片（#lyricsAmbientLeft）用**同一套
+   样式**，左侧整体套 scaleX(-1) 镜像 + inset 翻转（见本段末尾），
+   不在 CSS 里写第二份「left 版」。两片各自有开关（body.ambient-light / body.ambient-left），
+   脚本每帧把同一组 --ambient-sx / --ambient-sy 写进两个容器，所以左右严格同步。
+   内层（.ambient-fog / .ambient-puff）不按 body 开关门控，只挂在 .lyrics-ambient 上 ——
+   开关只决定外层容器显不显示，容器一隐藏内层自然看不到。
+
+   两片雾都挂在 .ambient-layer 上（.full-player 的直接子元素），
+   包含块 = .full-player 的 padding box = **整个窗口**，
+   所以下面这些百分比全部以窗口为基准，与 .full-stage 那个 1680px 的上限无关。
+
+   动态为什么是「横向为主、纵向为辅」（都是实测结论，别再改回去）：
+     ① 亮度不能动。透明度从 .42 跳到 .90 时鼓点每一下都在明暗跳，就是「一闪一闪」；
+        收到 .66~.76 仍然在闪 —— 因为体积当时一动不动，那点亮度差成了唯一的动态。
+        人眼对亮度突变极敏感，透明度天生不适合表现连续动态，所以恒定 .74。
+     ② 横向是可靠可见的轴，且缩放原点必须在右缘。origin 100% 时雾只向左伸缩、
+        右缘纹丝不动（贴边不受影响），实测 33% 像素变化、峰值 48，一眼可见；
+        原点放 68% 时只有 11%、峰值 13，肉眼无感。
+     ③ 纵向要给一点，但**必须先给雾层一道上下渐隐边界**（.ambient-fog 的第二层
+        mask）。没有边界时，雾层纵向是一整片均匀的场，scaleY 拉伸均匀值等于没变化 ——
+        实测 scaleY 1.04→1.28 全窗口只有 2 个像素差异、峰值 7，纯属白给。
+        加上 20% 的上下渐隐、边界落进窗口之后，边界会随 scaleY 一起上下胀缩，
+        纵向才真的动起来（实测峰值 29、改动面积约 5%，静息形态只被改 4.6%）。
+        渐隐也不能调浅：元素上下外扩 -14%/-12%，渐隐浅于 12% 就整段落在窗口外。
+   ========================================================================== */
+
+/* 氛围灯层：左右两片共用的定位容器，是 .full-player 的直接子元素（见 index.html）。
+   inset: 0 让它的盒子等于 .full-player 的 padding box —— 也就是**整个窗口**，
+   于是两片雾的百分比一律以窗口为基准。
+   ⚠️ 它是为了甩掉 .full-stage 这个包含块才存在的：`.full-player > *` 会给 .full-stage
+   加 position: relative，而 .full-stage 有 max-width: 1680px + margin: 0 auto ——
+   窗口一宽它就居中往里缩，挂在它里面的雾会跟着一起离开窗口边缘。
+   实测：窗口 1895px 是极限，1920px 偏 12px，2560px 偏 332px。
+   z-index: 1 与 .full-stage 同级、DOM 又排在它前面，所以叠出来的顺序仍是
+   「封面模糊背景(.full-player::before, z-index 0) → 氛围灯 → 歌词(.full-stage)」；
+   顶栏拖拽条是 z-index: 7，仍在雾之上，不会被雾糊到。
+   pointer-events: none —— 这一层纯装饰，绝不能挡住下面的点击。 */
+.full-player > .ambient-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.lyrics-ambient { display: none; }
+
+/* 左右两片各自听自己的开关：右侧看 body.ambient-light，左侧看 body.ambient-left。
+   右边那条 :not(.ambient-left) 是必须的 —— 不加的话「右侧开关」会把两片一起点亮
+   （两片都带 .lyrics-ambient，第一选择器会同时命中左侧那片）。
+   下面这一大块几何写的是**右侧**版（左留白、右贴边，百分比相对整个窗口）；
+   左侧那片由本段末尾的镜像规则整体覆盖（inset 翻转 + scaleX(-1)），不需要另写一套。 */
+body.ambient-light .full-player .lyrics-ambient:not(.ambient-left),
+body.ambient-left .full-player .lyrics-ambient.ambient-left {
+  display: block;
+  position: absolute;
+  /* 包含块 = .ambient-layer（position: absolute + inset: 0）= .full-player 的
+     padding box = 整个窗口。所以下面的百分比一律按**窗口**算。
+     z-index: -1 把雾压在歌词文字下面：它是 .ambient-layer（z-index: 1，构成堆叠
+     上下文）里的负层，落在 .ambient-layer 的背景之上、内容之下；而 .ambient-layer
+     本身排在 .full-stage 前面、又都带 z-index: 1，所以叠出来正好是
+     封面模糊背景(.full-player::before) → 氛围灯 → 歌词。超出窗口的部分由
+     overflow: hidden 的 .full-player 裁掉。 */
+  z-index: -1;
+  /* 这一段几何是右侧那片的：只占右半边、左边留白（歌词左对齐，
+     左半边一个像素都不染，刚调好的字后阴影在暗底上才不会被亮雾冲淡）。
+     百分比按窗口算 → [56.4%, 106.4%]，左侧那片是它关于窗口中线的镜像 [−6.4%, 43.6%]。
+     右缘必须伸到窗口外一大截：blur(46px) 会在层边界往里吃掉约 70px 的
+     透明过渡带，层边贴着窗口的话，雾还没到窗口右缘就淡没了 ——
+     这就是之前右边留了一条黑边的原因。 */
+  /* 纵向从 -24%/-22% 收到 -14%/-12%：一是雾团整体别铺这么满（用户嫌「太大」），
+     二是给纵向缩放留出可见空间 —— 之前外扩太多，雾团上下早就顶出窗口被裁掉，
+     纵向怎么放大窗口里都没差别（实测 2 个像素）。收进来之后纵向的胀缩才看得见。
+     横向保持比例不动：右边贴边、左边留白都是按这个量算好的。 */
+  inset: -14% -6.4% -12% 56.4%;
+  pointer-events: none;
+  /* 浓度恒定。这里的教训值得记一笔：
+     ⚠️ 2026-10-07 曾把这一行改成 var(--ambient-alpha)（.74~.86）做「鼓点加亮」，
+     用户反馈「并没有变亮的效果」—— 实测证实【完全看不出】：外层 opacity 是整体等比
+     压缩，而雾合成后的有效不透明度本来就低（3 个色团 + 保底渐变再过 blur(46px)），
+     16% 的相对提升落到像素上 max 只有 9/255。判据：峰值 13 已是肉眼 0%，
+     量程参考「把整片雾整个关掉」也才 52。
+     加亮改由下面 .lyrics-ambient::after 那层独立高光承担 —— 它是【新增的一层】，
+     对比度不依赖雾本来的浓度，同样的观感只要 max 50 左右就能做到。
+     （这里也**不能**写 transition: opacity，会把每帧当新目标去插值。） */
+  opacity: .74;
+  /* 漂移放在最外层，周期取长一点（43s）：位置一变模糊就白算了，
+     所以它只管平移，不碰 scale；平移不改变子树内容，模糊结果照样复用。 */
+  animation: ambient-drift 43s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* 鼓点高光：鼓点到达时叠上去的一层「更亮的光」。
+
+   ⚠️ 为什么不改外层 opacity —— 见上面 .lyrics-ambient 里那段实测记录（max 只有 9/255）。
+   ⚠️ 为什么不做成 .ambient-fog 的 ::after —— fog 带 filter: blur(46px)，把高光塞进它的
+   子树里，每帧改 opacity 就有让 46px 模糊重算的风险。这一层自己**不带 filter**：
+   背景本来就是柔和的线性渐变，形状靠同一套 mask + transform 与雾对齐。实测两者结果
+   几乎一致（max 42 vs 39、>26 占比 3.54% vs 3.43%），但这一层每帧只改 opacity，
+   是纯合成操作。
+   颜色用「主色混白」而不是纯白：纯白实测 max 49 < 混白 55，保留一点主色才像「被照亮」
+   而不是「糊了一层白」。
+   静息时 opacity 恒为 0 —— 把「动态强度」拉到 0% 时这一层完全不存在，
+   形态与加它之前逐像素一致。 */
+.full-player .lyrics-ambient::after {
+  content: "";
+  position: absolute;
+  /* 与 .lyrics-ambient / .ambient-fog 同框：inset 由父元素定，这里填满即可。 */
+  inset: 0;
+  pointer-events: none;
+  /* 与 .ambient-fog 的保底渐变同形，只是把所有 transparent 换成 #fff：
+     叠上去就是「同一片雾整体变亮泛白」，而不是浮出一块新的形状。 */
+  background: linear-gradient(to left,
+      color-mix(in srgb, var(--cover-accent, var(--accent)) 64%, #fff) 0%,
+      color-mix(in srgb, var(--cover-accent, var(--accent)) 38%, #fff) 34%,
+      transparent 62%);
+  /* 两道 mask 与 .ambient-fog 完全相同（横向渐隐 + 上下 20% 渐隐），
+     这样高光的边界与雾严丝合缝，不会浮出一块方形的亮斑。 */
+  -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, rgba(0, 0, 0, .30) 20%, #000 58%),
+      linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%);
+  -webkit-mask-composite: source-in;
+  mask-image:
+      linear-gradient(to right, transparent 0%, rgba(0, 0, 0, .30) 20%, #000 58%),
+      linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%);
+  mask-composite: intersect;
+  /* 跟着雾一起胀缩：--ambient-sx / --ambient-sy 从 .lyrics-ambient 继承下来，
+     原点同样钉在右缘。于是「鼓点一到 = 同时胀开 + 同时亮起」，是同一件事的两面。 */
+  transform: scale(var(--ambient-sx, 1), var(--ambient-sy, 1));
+  transform-origin: 100% 50%;
+  /* 由 JS 每帧写入：0（静息）~ flareRange（鼓点峰值）。
+     ⚠️ will-change: opacity 不能省 —— 这一层带 mask（mask 结果是要绘制的），
+     每帧改 opacity 若不提升为独立合成层，就可能被当成内容变化去重算 mask。
+     提升之后改 opacity 只是合成参数，零重绘。代价是一个层的显存，值。 */
+  opacity: var(--ambient-flare, 0);
+  will-change: opacity;
+}
+
+/* 这一层负责把三个色团「糊开」——雾就是在这里成形的。
+   mask 让雾从左边完全化开、向右渐浓：不加的话模糊之后会留下一条挺直的左边界，
+   看着像一根竖着的光柱，而不是「从画面外漫进来的一片雾」。
+   注意 CSS 里 filter 先作用、mask 后作用，所以是「先糊开、再渐隐」，
+   正是这里要的顺序。 */
+/* 内层这几条**不按 body 开关门控**，只挂在 .lyrics-ambient 上 ——
+   开关只决定外层容器 display 与否，容器一隐藏内层自然看不到。
+   这样左右两片共用同一套内层样式，不必写成「左侧也来一份」。 */
+.full-player .lyrics-ambient .ambient-fog {
+  position: absolute;
+  inset: 0;
+  /* 右缘保底层：三个色团都是径向渐变，到各自椭圆边缘必然淡出，
+     谁也保证不了窗口右缘还有颜色。这条横向渐变从层右缘往左收 ——
+     右缘永远有底色，和色团一起被 blur 糊成同一片雾，看不出接缝。 */
+  background: linear-gradient(to left,
+      color-mix(in srgb, var(--cover-accent, var(--accent)) 64%, transparent) 0%,
+      color-mix(in srgb, var(--cover-accent, var(--accent)) 38%, transparent) 34%,
+      transparent 62%);
+  filter: blur(46px) saturate(1.15);
+  /* 两层 mask 相交（mask-composite: intersect）：
+     ① 横向：让雾从左边完全化开、向右渐浓 —— 不加的话模糊之后会留下一条挺直的
+        左边界，看着像一根竖着的光柱，而不是「从画面外漫进来的一片雾」。
+     ② 纵向：上下各 20% 渐隐，给雾一道**上下边界**。这道边界是纵向动态能成立的
+        前提 —— 没有它，雾层在纵向是一片均匀的场（保底渐变纵向无起伏 + 三个色团
+        叠满整个高度），scaleY 拉伸均匀值等于没变化，实测峰值只有 7、全窗口仅
+        2 个像素差异；有了边界，它会随 scaleY 一起上下胀缩，纵向才真的看得见
+        （实测峰值 29、改动面积约 5%）。
+        渐隐**不能调浅**：元素纵向是外扩的（inset 上下 -14%/-12%，元素高 126%），
+        渐隐浅于 12% 会整段落在窗口外、等于没做。20% 这一档最平衡：静息形态
+        只动 4.6%（几乎看不出），动起来又看得见。
+     注意 CSS 里 filter 先作用、mask 后作用，所以顺序是「先糊开、再渐隐」——
+     边界是干净的渐隐，不会被 blur 再糊散，正是这里要的。 */
+  -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, rgba(0, 0, 0, .30) 20%, #000 58%),
+      linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%);
+  -webkit-mask-composite: source-in;
+  mask-image:
+      linear-gradient(to right, transparent 0%, rgba(0, 0, 0, .30) 20%, #000 58%),
+      linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%);
+  mask-composite: intersect;
+  /* 横向为主（.48 → 1.36，近 3 倍动态范围）、纵向为辅（1.00 → 1.26）。
+     横轴是主力：实测最可靠可见。纵轴靠上面那道上下渐隐边界才活了起来，
+     幅度只给 .26 —— 用户要的是「稍微一点，不用多」。 */
+  transform: scale(var(--ambient-sx, 1), var(--ambient-sy, 1));
+  /* 原点必须钉在右缘（100% 50%）：雾层右缘在窗口外，以它为原点缩放时右缘不动、
+     整片雾只向左伸缩，右边贴边永远不受影响，也不会把雾重心整体往右推。
+     实测原点放 68% 时同样的缩放只有 11% 像素变化、峰值 13，肉眼根本看不出来。
+     纵向 50% 居中：上下对称胀缩，雾重心不会整体上移或下沉，渐隐边界上下同时外扩。 */
+  transform-origin: 100% 50%;
+}
+
+.full-player .lyrics-ambient .ambient-puff {
+  position: absolute;
+  display: block;
+  border-radius: 50%;
+  opacity: .92;
+  background: radial-gradient(closest-side,
+      color-mix(in srgb, var(--cover-accent, var(--accent)) 74%, #fff) 0%,
+      color-mix(in srgb, var(--cover-accent, var(--accent)) 72%, transparent) 42%,
+      transparent 100%);
+}
+
+/* 三团位置错开、大小不一，模糊之后互相吃掉，浓淡才是自然的不匀。
+   三团都落在容器右半侧，雾心自然压在歌词区的右半边。
+   容器右缘外扩后，right 按新宽度反算过（right% · 新宽 + 外扩量 = 旧绝对位置），
+   雾心位置和之前一致，不会整体往右飘。
+   用户嫌雾团太大：三团宽度各缩到原来的 1/3（88→58 / 100→66 / 82→54），
+   高度略收，让雾更像竖长一条窄雾带；缩窄后雾心会左移，靠 right 一起左移补偿，
+   右缘仍靠 .ambient-fog 的保底渐变兜住。 */
+.full-player .lyrics-ambient .ambient-puff.p1 { top: -6%; right: 34%; width: 58%; height: 58%; }
+.full-player .lyrics-ambient .ambient-puff.p2 { top: 20%; right: 30%; width: 66%; height: 64%; }
+.full-player .lyrics-ambient .ambient-puff.p3 { bottom: -10%; right: 36%; width: 54%; height: 52%; }
+
+@keyframes ambient-drift {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  30%      { transform: translate3d(-2.2%, -3%, 0); }
+  62%      { transform: translate3d(1.6%, 2.4%, 0); }
+}
+
+/* ---- 左侧那片：整层水平镜像 -------------------------------------------------
+   不去重写一套 left 版样式，而是给整层套 scaleX(-1) —— 镜像翻的是整棵子树：
+   雾的横向渐变、横向遮罩、三个色团的 right 定位、连 .ambient-fog 的
+   transform-origin 一起翻过去，所以左右是**严格对称**的，
+   也不会出现两边差一两像素的偏差。
+
+   inset 就是右侧那组的镜像，两个数直接对调 + 取反：
+       右侧  inset: -14% -6.4% -12% 56.4%   → 盒子 [56.4%, 106.4%]
+       左侧  inset: -14% 56.4% -12% -6.4%   → 盒子 [-6.4%, 43.6%]
+   因为两片现在共用同一个包含块（.ambient-layer = 整个窗口），
+   这组数是**精确**镜像，与窗口宽度完全无关 —— 窗口再宽也不会跑偏。
+
+   ⚠️ 漂移动画必须换成 flip 版：animation 会整个接管 transform，沿用右侧版的
+   ambient-drift 会把 scaleX(-1) 覆盖掉，左侧那片就直接正回来了。
+   关键帧里 scaleX(-1) 写在前面，translate 就发生在镜像后的坐标系里，
+   位移方向自动跟着翻 —— 正是「两边对称漂」要的效果。 */
+body.ambient-left .full-player .lyrics-ambient.ambient-left {
+  inset: -14% 56.4% -12% -6.4%;
+  transform: scaleX(-1);
+  animation: ambient-drift-flip 43s ease-in-out infinite;
+}
+
+@keyframes ambient-drift-flip {
+  0%, 100% { transform: scaleX(-1) translate3d(0, 0, 0); }
+  30%      { transform: scaleX(-1) translate3d(-2.2%, -3%, 0); }
+  62%      { transform: scaleX(-1) translate3d(1.6%, 2.4%, 0); }
 }
