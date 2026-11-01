@@ -6,7 +6,7 @@
 const OrangeTags = window.OrangeTags || {};
 const {
   decodeTextBuffer, readVorbisTags, readMp4Tags, readWavTags, readId3,
-  parseLyrics, splitFileName, readTechInfo
+  parseLyrics, splitFileName, readTechInfo, readDuration
 } = OrangeTags;
 
 // 本程序只作为 PC 客户端运行：在普通浏览器中打开时直接给出提示并停止初始化
@@ -41,10 +41,34 @@ const FORMAT_ALIASES = { M4A: 'AAC', MP4: 'AAC', OGA: 'OGG', AIF: 'AIFF' };
 function readStored(key, fallback) {
   try {
     const value = localStorage.getItem(key);
-    return value ? JSON.parse(value) : fallback;
+    if (!value) return fallback;
+    const parsed = JSON.parse(value);
+    // localStorage 里可能残留 "null" / "undefined" 之类的内容，
+    // 直接返回会让后续的 .map / new Set() 在启动阶段抛错，统一回落到默认值。
+    return parsed === null || parsed === undefined ? fallback : parsed;
   } catch {
     return fallback;
   }
+}
+
+function readStoredArray(key) {
+  const value = readStored(key, []);
+  return Array.isArray(value) ? value : [];
+}
+
+function readStoredObject(key) {
+  const value = readStored(key, {});
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function readPlaylists() {
+  return readStoredArray('orange-playlists-clean')
+    .filter(playlist => playlist && typeof playlist === 'object' && playlist.id)
+    .map(playlist => ({
+      ...playlist,
+      name: String(playlist.name || '未命名歌单'),
+      tracks: Array.isArray(playlist.tracks) ? playlist.tracks.filter(Boolean) : []
+    }));
 }
 
 const defaultPrefs = {
@@ -67,6 +91,10 @@ const defaultPrefs = {
   eqPreset: 'flat',
   // 与 EQ_BANDS 一一对应的 10 段增益（旧版这里只写了 5 项，是均衡器的一个 bug，详见 normalizedEqGains）
   eqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  // 用户点「保存当前设置」存下来的自定义均衡（与 EQ_BANDS 等长）。
+  // 和 eqGains 分开存：eqGains 是"当前正在用的"，eqCustom 是"存档"，
+  // 这样切到别的预设再切回来，用户自己存的那套不会被冲掉。
+  eqCustom: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   lyricOffset: 0,
   lyricBlur: 0,
   lyricTheme: 'cover',
@@ -109,7 +137,21 @@ const defaultPrefs = {
   customThemeTint: 62,
   sidebarEffect: 'blur',
   sidebarBlur: 26,
-  sidebarOpacity: 78
+  sidebarOpacity: 78,
+  // ---------- 桌面歌词悬浮窗（Apple Music 风格）----------
+  // 是否显示桌面歌词；外观参数全部下发给独立的透明悬浮窗
+  desktopLyrics: false,
+  dlBlur: 28,           // 背景模糊程度（px）
+  dlOpacity: 35,        // 背景不透明度（0~100）
+  dlFontSize: 34,       // 歌词字号（px）
+  dlTextColor: '#ffffff',   // 歌词文字颜色
+  dlTextDepth: 100,     // 歌词文字浓度/深度（0~100，越大文字越实越清晰）
+  dlAccentColor: '#e84b3c', // 逐字点亮 / 发光强调色
+  dlBgColor: '',        // 背景底色（空 = 由文字色自动推导深浅）
+  dlAlign: 'center',    // 对齐：left / center / right
+  dlRadius: 18,         // 圆角（px）
+  dlShowMeta: true,     // 是否显示歌名/歌手
+  dlLocked: false       // 是否锁定（锁定后不可拖动）
 };
 
 const THEME_COLORS = ['default', 'peach', 'mint', 'sky', 'lilac', 'lemon', 'sakura'];
@@ -158,15 +200,27 @@ function normalizedEqGains() {
   return EQ_BANDS.map((_, index) => Number(source[index]) || 0);
 }
 
+/** 用户存档的自定义均衡，同样归一化成与 EQ_BANDS 等长 */
+function normalizedCustomEq() {
+  const source = Array.isArray(state.prefs.eqCustom) ? state.prefs.eqCustom : [];
+  return EQ_BANDS.map((_, index) => Number(source[index]) || 0);
+}
+
+/** 把 -12 ~ +12 的增益格式化成带符号的显示文本：+3 / 0 / -5 */
+function formatEqDb(value) {
+  const number = Number(value) || 0;
+  return `${number > 0 ? '+' : ''}${number}`;
+}
+
 const state = {
   page: 'home',
   tab: 'playlists',
   format: 'all',
   query: '',
   songs: [],
-  favorites: new Set(readStored('orange-favorites', [])),
-  recent: readStored('orange-recent', []),
-  playlists: readStored('orange-playlists-clean', []),
+  favorites: new Set(readStoredArray('orange-favorites')),
+  recent: readStoredArray('orange-recent').filter(id => typeof id === 'string'),
+  playlists: readPlaylists(),
   queue: [],
   currentId: null,
   playing: false,
@@ -174,8 +228,8 @@ const state = {
   repeat: 0,
   volume: .78,
   muted: false,
-  progress: readStored('orange-progress', {}),
-  prefs: { ...defaultPrefs, ...readStored('orange-prefs', {}) },
+  progress: readStoredObject('orange-progress'),
+  prefs: { ...defaultPrefs, ...readStoredObject('orange-prefs') },
   recommendationOffset: 0,
   importedIds: [],
   pendingAddId: null,
@@ -189,6 +243,11 @@ const state = {
 let demoUrl = null;
 let demoForId = null;
 let toastTimer = null;
+// 从「添加到歌单」弹窗点「新建歌单」时，把待加入的歌曲暂存到这里，
+// 等新歌单创建完成后再真正写进去（原来提示写着「创建后加入」，实际什么也没加）。
+let pendingNewPlaylistIds = [];
+// 导入是逐文件 await 的长流程，重复点「导入」/ 又拖一批文件会交错写入资料库
+let importingFiles = false;
 let seeking = false;
 let audioContext = null;
 let analyser = null;
@@ -198,6 +257,8 @@ let eqFilters = [];
 let gainNode = null;
 let fadeTimer = null;
 let pendingResume = 0;
+// 切歌请求序号：只允许最后一次 playTrack 的结果落到 audio 上，避免异步解析音源时被旧请求覆盖
+let playRequestToken = 0;
 // 续播范围收窄：只有「本次启动、且正是上次关闭时在播的那一首」才恢复进度。
 // 其余任何切歌 / 装载一律从 0:00 开始，避免每首歌都接着上次的位置播。
 let bootResumeId = null;
@@ -216,17 +277,30 @@ state.repeat = Number(savedPlayback.repeat) || 0;
 // 注：state 初始化时已经做过一次 { ...defaultPrefs, ...已存偏好 }，这里无需再合并一遍
 
 function saveState() {
-  localStorage.setItem('orange-favorites', JSON.stringify([...state.favorites]));
-  localStorage.setItem('orange-recent', JSON.stringify(state.recent));
-  localStorage.setItem('orange-playlists-clean', JSON.stringify(state.playlists));
+  try {
+    localStorage.setItem('orange-favorites', JSON.stringify([...state.favorites]));
+    localStorage.setItem('orange-recent', JSON.stringify(state.recent));
+    localStorage.setItem('orange-playlists-clean', JSON.stringify(state.playlists));
+  } catch (error) {
+    // 存储满 / 被禁用时不要让一次写入失败打断播放
+    console.warn('Unable to persist state', error);
+  }
 }
 
 function savePrefs() {
-  localStorage.setItem('orange-prefs', JSON.stringify(state.prefs));
+  try {
+    localStorage.setItem('orange-prefs', JSON.stringify(state.prefs));
+  } catch (error) {
+    console.warn('Unable to persist preferences', error);
+  }
 }
 
 function savePlaybackModes() {
-  localStorage.setItem('orange-playback', JSON.stringify({ shuffle: state.shuffle, repeat: state.repeat }));
+  try {
+    localStorage.setItem('orange-playback', JSON.stringify({ shuffle: state.shuffle, repeat: state.repeat }));
+  } catch (error) {
+    console.warn('Unable to persist playback modes', error);
+  }
 }
 
 function saveProgress() {
@@ -236,6 +310,9 @@ function saveProgress() {
 }
 
 function songRecord(song) {
+  const offset = song._lyricOffset;
+  const hasOffset = offset !== null && offset !== undefined && offset !== '' && Number.isFinite(Number(offset));
+  const replayGain = song._replayGain;
   return {
     id: song.id,
     path: song._path || '',
@@ -247,15 +324,30 @@ function songRecord(song) {
     cover: song.cover || '',
     size: Number(song._size) || 0,
     tech: song._tech || {},
-    lyricOffset: Number.isFinite(Number(song._lyricOffset)) && song._lyricOffset !== null ? Number(song._lyricOffset) : null
+    replayGain: replayGain !== null && replayGain !== undefined && Number.isFinite(Number(replayGain))
+      ? Number(replayGain)
+      : null,
+    lyricOffset: hasOffset ? Number(offset) : null,
+    // 手动导入 / 粘贴的歌词没有对应的磁盘 .lrc，资料库不记的话重启就丢了。
+    // 内嵌歌词和同名歌词文件每次播放都会重新读取，不需要存。
+    lyricText: song._lyricManual && song._lyricText ? String(song._lyricText).slice(0, 200000) : ''
   };
 }
 
 function saveLibrary() {
   try {
     const records = state.songs.filter(song => song._path).map(songRecord);
-    localStorage.setItem('orange-library', JSON.stringify(records));
-    localStorage.setItem('orange-queue', JSON.stringify(state.queue.filter(id => getTrack(id))));
+    const known = new Set(state.songs.map(song => song.id));
+    try {
+      localStorage.setItem('orange-library', JSON.stringify(records));
+    } catch (error) {
+      // 手动歌词正文可能把 localStorage 配额撑爆。宁可丢掉歌词正文，也要保住资料库本身，
+      // 否则整次写入失败 = 这次新增/编辑的歌曲全部丢失。
+      console.warn('Library quota exceeded, retry without lyric text', error);
+      const slim = records.map(record => (record.lyricText ? { ...record, lyricText: '' } : record));
+      localStorage.setItem('orange-library', JSON.stringify(slim));
+    }
+    localStorage.setItem('orange-queue', JSON.stringify(state.queue.filter(id => known.has(id))));
   } catch (error) {
     console.warn('Unable to persist library', error);
   }
@@ -308,6 +400,7 @@ async function restoreLibrary() {
     }
   }
   const songs = [];
+  const usedIds = new Set();
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (!record || !record.path) continue;
@@ -317,8 +410,12 @@ async function restoreLibrary() {
       const exists = await desktop.pathExists(record.path).catch(() => true);
       if (!exists) continue;
     }
+    let id = record.id || `f${songs.length}${Date.now()}`;
+    if (usedIds.has(id)) id = `f${songs.length}${Date.now()}`;
+    usedIds.add(id);
+    const lyricText = typeof record.lyricText === 'string' ? record.lyricText : '';
     songs.push({
-      id: record.id || `f${songs.length}${Date.now()}`,
+      id,
       title: record.title || '未知歌曲',
       artist: record.artist || '未知音乐人',
       album: record.album || '本地文件',
@@ -332,16 +429,25 @@ async function restoreLibrary() {
       _path: record.path,
       _size: Number(record.size) || 0,
       _tech: record.tech || {},
+      _replayGain: record.replayGain !== null && record.replayGain !== undefined
+        && Number.isFinite(Number(record.replayGain))
+        ? Number(record.replayGain)
+        : null,
       _lyricOffset: Number.isFinite(Number(record.lyricOffset)) && record.lyricOffset !== null && record.lyricOffset !== ''
         ? Number(record.lyricOffset)
         : null,
-      _lyrics: []
+      // 手动导入 / 粘贴的歌词存的是原始文本，恢复时重新解析，避免把解析结果塞进 localStorage
+      _lyrics: lyricText ? parseLyrics(lyricText) : [],
+      _lyricText: lyricText,
+      _lyricManual: Boolean(lyricText),
+      _lyricSource: lyricText ? 'manual' : '',
+      _lyricChecked: Boolean(lyricText)
     });
   }
   state.songs = songs;
   // 队列里只保留仍存在于资料库的 id。用 Set 查表，避免对每个队列项都遍历一次 songs
   const validIds = new Set(songs.map(song => song.id));
-  const savedQueue = readStored('orange-queue', []).filter(id => validIds.has(id));
+  const savedQueue = readStoredArray('orange-queue').filter(id => validIds.has(id));
   state.queue = savedQueue.length ? savedQueue : songs.map(song => song.id);
   return songs.length;
 }
@@ -354,6 +460,10 @@ async function loadSidecarLyrics(track) {
   if (lyrics.length) {
     track._lyrics = lyrics;
     track._lyricPath = result.path || '';
+    track._lyricSource = 'sidecar';
+    // 重新从磁盘读到歌词后，旧的手动歌词正文不应再被当作「用户手动歌词」落库
+    track._lyricManual = false;
+    track._lyricText = '';
   }
   return lyrics;
 }
@@ -368,6 +478,8 @@ async function loadTrackLyrics(track) {
       track._lyrics = result.lyrics;
       track._lyricSource = result.source;
       track._lyricPath = result.path || '';
+      track._lyricManual = false;
+      track._lyricText = '';
       return result.lyrics;
     }
   }
@@ -449,7 +561,13 @@ function setQualityBadge(track, fallbackText) {
   const badge = $('#fullContext');
   if (!badge) return;
   const text = fallbackText || qualityLabel(track);
-  badge.innerHTML = `<svg class="icon"><use href="#i-audio-lines"/></svg><b>${escapeHtml(text)}</b>`;
+  // 只改文字，不要把 badge 的 innerHTML 整个替换掉：
+  // 里面那个 <b id="fullFormat"> 被替换掉之后，updatePlayerUi 再也找不到它，
+  // 后续所有「格式」更新都会静默失效（这正是旧版播放后格式标签消失的原因）。
+  const label = $('#fullFormat');
+  if (label) label.textContent = text;
+  else badge.textContent = text;
+  badge.title = text;
 }
 
 // 原始歌词（未做任何过滤）
@@ -535,7 +653,8 @@ function filteredSongs() {
   const query = state.query.trim().toLowerCase();
   return state.songs.filter(song => {
     const formatMatch = state.format === 'all' || song.format === state.format;
-    const queryMatch = !query || [song.title,song.artist,song.album,song.format].some(value => value.toLowerCase().includes(query));
+    const queryMatch = !query || [song.title, song.artist, song.album, song.format]
+      .some(value => String(value ?? '').toLowerCase().includes(query));
     return formatMatch && queryMatch;
   });
 }
@@ -565,7 +684,8 @@ function renderRecommendations() {
     return;
   }
   const list = [];
-  for (let i = 0; i < 4; i += 1) {
+  const count = Math.min(4, state.songs.length);
+  for (let i = 0; i < count; i += 1) {
     list.push(state.songs[(state.recommendationOffset + i) % state.songs.length]);
   }
   target.innerHTML = list.map(cardHtml).join('');
@@ -639,12 +759,16 @@ function renderFavorites() {
 }
 
 function playlistCoverHtml(playlist) {
+  // 自定义封面优先：编辑弹窗里换的封面之前只存不显示，等于白选
+  if (playlist.cover && playlist.cover !== DEFAULT_COVER) {
+    return `<div class="playlist-cover single"><img src="${escapeHtml(playlist.cover)}" alt="" /></div>`;
+  }
   const songs = playlist.tracks.map(getTrack).filter(Boolean).slice(0,4);
   if (!songs.length) {
     return `<div class="playlist-cover single"><div class="playlist-symbol"><svg class="icon"><use href="#i-list"/></svg></div></div>`;
   }
-  if (songs.length === 1) return `<div class="playlist-cover single"><img src="${songs[0].cover}" alt="" /></div>`;
-  return `<div class="playlist-cover">${songs.slice(0,4).map(song => `<img src="${song.cover}" alt="" />`).join('')}</div>`;
+  if (songs.length === 1) return `<div class="playlist-cover single"><img src="${escapeHtml(songs[0].cover)}" alt="" /></div>`;
+  return `<div class="playlist-cover">${songs.slice(0,4).map(song => `<img src="${escapeHtml(song.cover)}" alt="" />`).join('')}</div>`;
 }
 
 function renderPlaylists() {
@@ -747,10 +871,11 @@ function renderSearchResults() {
   }
   const scope = state.searchScope || 'all';
   const matches = state.songs.filter(song => {
-    if (scope === 'title') return song.title.toLowerCase().includes(query);
-    if (scope === 'artist') return song.artist.toLowerCase().includes(query);
-    if (scope === 'album') return song.album.toLowerCase().includes(query);
-    return [song.title, song.artist, song.album, song.format].some(value => String(value).toLowerCase().includes(query));
+    if (scope === 'title') return String(song.title ?? '').toLowerCase().includes(query);
+    if (scope === 'artist') return String(song.artist ?? '').toLowerCase().includes(query);
+    if (scope === 'album') return String(song.album ?? '').toLowerCase().includes(query);
+    return [song.title, song.artist, song.album, song.format]
+      .some(value => String(value ?? '').toLowerCase().includes(query));
   });
   heading.textContent = `搜索结果 · ${matches.length} 首`;
   if (!matches.length) {
@@ -847,6 +972,10 @@ function batchRemoveSelected() {
   if (!window.confirm(`将要移除 ${ids.length} 首歌曲（磁盘上的音乐文件不会被删除）。确定继续吗？`)) return;
   ids.forEach(id => removeTrack(id, { silent: true }));
   state.selection.clear();
+  // removeTrack 的 silent 分支只摘数据不落盘，批量移除必须在这里补一次，
+  // 否则收藏 / 最近播放 / 歌单里的这些 id 还留在 localStorage 里。
+  saveState();
+  saveProgress();
   saveLibrary();
   renderAll();
   updatePlayerUi();
@@ -875,6 +1004,23 @@ function updateFavoriteUi() {
   $('#fullFavorite').classList.toggle('active', active);
 }
 
+/**
+ * 只同步列表里的「正在播放」状态，不重建 DOM。
+ * 之前 updatePlayerUi 每换一首歌就把歌曲 / 喜爱 / 队列三个列表整段 innerHTML 重写，
+ * 大曲库下切歌明显卡顿，滚动位置和键盘焦点也会丢。
+ */
+function refreshTrackRows() {
+  $$('.track-row').forEach(row => {
+    const id = row.dataset.track;
+    row.classList.toggle('playing', Boolean(id) && id === state.currentId);
+    const use = row.querySelector('.row-play use');
+    if (use) use.setAttribute('href', id === state.currentId && state.playing ? '#i-pause' : '#i-play');
+  });
+  $$('.queue-row').forEach(row => {
+    row.classList.toggle('active', row.dataset.queueTrack === state.currentId);
+  });
+}
+
 function updatePlayerUi() {
   const track = getTrack(state.currentId);
   if (!track) {
@@ -884,9 +1030,10 @@ function updatePlayerUi() {
     $('#fullCover').src = DEFAULT_COVER;
     $('#fullTitle').textContent = '未播放';
     $('#fullArtist').textContent = '导入歌曲后即可播放';
-    const emptyFormat = $('#fullFormat');
-    if (emptyFormat) emptyFormat.textContent = '—';
     setQualityBadge(null, '暂无音轨');
+    // 清掉上一首残留的封面取色 / 歌词背景，否则空资料库打开歌词界面仍是上一张封面的色调
+    applyCoverAccent('');
+    applyLyricTheme();
     ['#currentTime', '#fullCurrentTime', '#totalTime', '#fullTotalTime'].forEach(selector => {
       const node = $(selector);
       if (node) node.textContent = '0:00';
@@ -898,6 +1045,7 @@ function updatePlayerUi() {
     $('#miniFavorite').classList.remove('active');
     $('#fullFavorite').classList.remove('active');
     renderLyrics();
+    refreshTrackRows();
     return;
   }
   $('#miniCover').src = track.cover;
@@ -909,15 +1057,12 @@ function updatePlayerUi() {
   applyLyricTheme();
   $('#fullTitle').textContent = track.title;
   $('#fullArtist').textContent = `${track.artist} · ${track.album}`;
-  const formatLabel = $('#fullFormat');
-  if (formatLabel) formatLabel.textContent = track.format;
   setQualityBadge(track);
   updateFavoriteUi();
   updatePlayIcons();
   renderLyrics();
-  renderLocalTracks();
-  renderFavorites();
-  renderQueue();
+  refreshTrackRows();
+  pushDesktopLyricsState();
 }
 
 function ensureAudioGraph() {
@@ -1062,7 +1207,11 @@ async function playTrack(id, forcePlay = true) {
   // 任何音源。所以即使 id 与 currentId 相同，只要 audio.src 为空就必须重新
   // 装载，否则 play() 会因没有音源直接失败（表现为“刚打开软件点播放没反应”）。
   const changed = state.currentId !== id || !audio.src;
+  const token = ++playRequestToken;
   const source = changed ? await resolveTrackSource(track) : '';
+  // 解析音源要走一次 IPC。用户连点两首歌时，先发出的请求可能后返回；
+  // 如果不校验 token，它会把后点的那首覆盖掉（表现为「点了 A 却在放 B」）。
+  if (token !== playRequestToken || !getTrack(id)) return;
   if (changed) {
     state.currentId = id;
     if (demoUrl && demoForId !== id) {
@@ -1079,7 +1228,7 @@ async function playTrack(id, forcePlay = true) {
     audio.load();
     applyReplayGain(track);
     applyPlaybackRate();
-    localStorage.setItem('orange-last-track', JSON.stringify(id));
+    try { localStorage.setItem('orange-last-track', JSON.stringify(id)); } catch {}
     state.recent = [id, ...state.recent.filter(item => item !== id)].slice(0,12);
     saveState();
     renderRecent();
@@ -1091,27 +1240,34 @@ async function playTrack(id, forcePlay = true) {
       if (lines.length && state.currentId === id) {
         renderLyricSource();
         renderLyrics();
+        pushDesktopLyricsState();
         showToast(track._lyricSource === 'embedded' ? '已读取歌曲内嵌歌词' : '已自动载入同名歌词文件');
       }
     });
   }
   ensureAudioGraph();
   if (audioContext?.state === 'suspended') await audioContext.resume();
+  if (token !== playRequestToken) return;
   if (forcePlay) {
     try {
       if (state.prefs.fade) audio.volume = 0;
       await audio.play();
+      // 播放启动也是异步的：期间用户可能已经切到别的歌，旧请求不要再改状态
+      if (token !== playRequestToken) return;
       state.playing = true;
       if (state.prefs.fade) fadeVolume(state.volume, fadeDuration());
       else applyVolume();
     } catch (error) {
+      if (token !== playRequestToken) return;
       const recovered = await recoverUnsupportedTrack(track).catch(() => false);
+      if (token !== playRequestToken) return;
       if (recovered) {
         audio.src = track._src;
         audio.load();
         try {
           if (state.prefs.fade) audio.volume = 0;
           await audio.play();
+          if (token !== playRequestToken) return;
           state.playing = true;
           if (state.prefs.fade) fadeVolume(state.volume, fadeDuration());
           updatePlayerUi();
@@ -1131,23 +1287,51 @@ async function playTrack(id, forcePlay = true) {
 
 function togglePlayback() {
   if (!audio.src) {
+    if (!state.currentId) {
+      showToast('还没有选择歌曲');
+      return;
+    }
     playTrack(state.currentId);
     return;
   }
-  if (audio.paused) {
+  // 用 state.playing 而不是 audio.paused 判断：暂停带淡出时 audio 还在响，
+  // 快速再按一次空格原来会被当成「再暂停一次」，结果怎么点都没声音。
+  if (!state.playing) {
     ensureAudioGraph();
+    cancelFade();
     if (state.prefs.fade) audio.volume = 0;
+    // 先切换 UI 状态再等 play()：play() 返回前用户再按一次空格时，
+    // 才能正确走到「暂停」分支，而不是又进一次播放分支。
+    state.playing = true;
+    updatePlayIcons();
+    updateLyricsActive();
     audio.play().then(() => {
-      state.playing = true;
-      updatePlayIcons();
+      if (!state.playing) {
+        audio.pause();
+        applyVolume();
+        return;
+      }
       if (state.prefs.fade) fadeVolume(state.volume, fadeDuration());
       else applyVolume();
-    }).catch(() => showToast('音频开始播放失败'));
+    }).catch(() => {
+      state.playing = false;
+      updatePlayIcons();
+      updateLyricsActive();
+      applyVolume();
+      showToast('音频开始播放失败');
+    });
   } else {
-    if (state.prefs.fade) fadeVolume(0, Math.max(40, fadeDuration() * .75), () => audio.pause());
-    else audio.pause();
     state.playing = false;
     updatePlayIcons();
+    updateLyricsActive();
+    if (state.prefs.fade) {
+      fadeVolume(0, Math.max(40, fadeDuration() * .75), () => {
+        // 淡出期间用户又点了播放：不要再把它暂停掉
+        if (!state.playing) audio.pause();
+      });
+    } else {
+      audio.pause();
+    }
   }
 }
 
@@ -1165,7 +1349,7 @@ function nextTrack(auto = false) {
   }
   if (state.repeat === 2 && auto) {
     audio.currentTime = 0;
-    audio.play();
+    audio.play().catch(() => {});
     return;
   }
   let index = queue.indexOf(state.currentId);
@@ -1232,6 +1416,7 @@ function detachTrack(id) {
   state.favorites.delete(id);
   state.recent = state.recent.filter(item => item !== id);
   state.importedIds = state.importedIds.filter(item => item !== id);
+  state.selection.delete(id);
   delete state.progress[id];
   state.playlists.forEach(playlist => {
     playlist.tracks = playlist.tracks.filter(item => item !== id);
@@ -1282,6 +1467,8 @@ function clearLibrary() {
   state.importedIds = [];
   state.progress = {};
   state.currentId = null;
+  state.selection.clear();
+  state.selectMode = false;
   state.playlists.forEach(playlist => { playlist.tracks = []; });
   saveState();
   saveProgress();
@@ -1320,6 +1507,14 @@ function clearSleepTimer() {
   updateSleepChip();
 }
 
+/** 定时器触发后要把设置页的下拉和持久化值一起复位，否则下次启动还显示「15 分钟」但计时器并不存在 */
+function resetSleepTimerPref() {
+  state.prefs.sleepTimer = 0;
+  savePrefs();
+  const select = $('#sleepTimer');
+  if (select) select.value = '0';
+}
+
 function applySleepTimer(minutes) {
   clearSleepTimer();
   const value = Number(minutes);
@@ -1332,11 +1527,11 @@ function applySleepTimer(minutes) {
   }
   sleepEndsAt = Date.now() + value * 60000;
   sleepTimerId = setTimeout(() => {
-    if (!audio.paused) {
-      audio.pause();
-      state.playing = false;
-      updatePlayIcons();
-    }
+    if (!audio.paused) audio.pause();
+    state.playing = false;
+    updatePlayIcons();
+    updateLyricsActive();
+    resetSleepTimerPref();
     clearSleepTimer();
     showToast('睡眠定时器时间到，已暂停播放');
   }, value * 60000);
@@ -1358,10 +1553,7 @@ function updateSleepChip() {
     chip.className = 'sleep-chip';
     chip.title = '点击取消睡眠定时器';
     chip.addEventListener('click', () => {
-      state.prefs.sleepTimer = 0;
-      savePrefs();
-      const select = $('#sleepTimer');
-      if (select) select.value = '0';
+      resetSleepTimerPref();
       clearSleepTimer();
       showToast('已取消睡眠定时器');
     });
@@ -1381,14 +1573,18 @@ function handleTrackEnded() {
   if (sleepAtTrackEnd) {
     state.playing = false;
     updatePlayIcons();
+    updateLyricsActive();
+    resetSleepTimerPref();
     clearSleepTimer();
     showToast('睡眠定时器：播完本曲已停止');
+    pushDesktopLyricsState();
     return;
   }
   if (state.prefs.autoNext || state.repeat === 2) nextTrack(true);
   else {
     state.playing = false;
     updatePlayIcons();
+    pushDesktopLyricsState();
   }
 }
 
@@ -1511,10 +1707,70 @@ function updateProgress() {
   $('#totalTime').textContent = formatTime(duration);
   $('#fullTotalTime').textContent = formatTime(duration);
   updateLyricsActive();
+  pushDesktopLyricsState();
   rememberProgress();
 }
 
+/**
+ * 拖放目录时 DataTransfer.files 里只有一个「文件夹」条目，直接交给 importFiles 会被扩展名过滤掉。
+ * 这里用 webkitGetAsEntry 递归把目录展开成真实文件列表（顺带补上 webkitRelativePath，
+ * 让专辑名和同名 .lrc 配对沿用和「选择文件夹」一致的规则）。
+ */
+async function filesFromDataTransfer(dataTransfer) {
+  const fallback = dataTransfer?.files ? [...dataTransfer.files] : [];
+  const items = dataTransfer?.items ? [...dataTransfer.items] : [];
+  const entries = items.map(item => {
+    try { return item.webkitGetAsEntry?.() || null; } catch { return null; }
+  }).filter(Boolean);
+  if (!entries.length) return fallback;
+
+  const files = [];
+  const readEntry = entry => new Promise(resolve => {
+    if (!entry) { resolve(); return; }
+    if (entry.isFile) {
+      entry.file(file => {
+        try {
+          const relative = String(entry.fullPath || '').replace(/^\//, '');
+          if (relative) Object.defineProperty(file, 'webkitRelativePath', { value: relative, configurable: true });
+        } catch {}
+        files.push(file);
+        resolve();
+      }, () => resolve());
+      return;
+    }
+    if (!entry.isDirectory) { resolve(); return; }
+    const reader = entry.createReader();
+    const readBatch = () => {
+      reader.readEntries(async batch => {
+        if (!batch.length) { resolve(); return; }
+        for (const child of batch) await readEntry(child);
+        readBatch();
+      }, () => resolve());
+    };
+    readBatch();
+  });
+
+  for (const entry of entries) await readEntry(entry);
+  return files.length ? files : fallback;
+}
+
 async function importFiles(fileList) {
+  if (importingFiles) {
+    showToast('正在导入歌曲，请稍候…');
+    return;
+  }
+  importingFiles = true;
+  try {
+    await importFilesInner(fileList);
+  } catch (error) {
+    console.warn('import failed', error);
+    showToast('导入过程中出现问题，请重试');
+  } finally {
+    importingFiles = false;
+  }
+}
+
+async function importFilesInner(fileList) {
   const statusBox = $('#scanStatus');
   const statusTitle = $('#scanStatusTitle');
   const statusDetail = $('#scanStatusDetail');
@@ -1554,6 +1810,7 @@ async function importFiles(fileList) {
   let skipped = 0;
   let duplicated = 0;
   let processed = 0;
+  let firstAddedId = null;
   const skippedPreview = [];
   // 资料库里已有的路径集合（Windows 路径不区分大小写，统一小写比对）。
   // 原来是每读一个文件就对整个 songs 做一次 some() 遍历，文件多时是 O(n×m)。
@@ -1564,7 +1821,7 @@ async function importFiles(fileList) {
   for (const file of files) {
     processed += 1;
     const url = URL.createObjectURL(file);
-    const extension = file.name.split('.').pop().toUpperCase();
+    const extension = (file.name.includes('.') ? file.name.split('.').pop() : '').toUpperCase();
     const format = FORMAT_ALIASES[extension] || extension;
     const nameParts = splitFileName(file.name);
     const sourcePath = window.orangeDesktop?.getPathForFile?.(file) || '';
@@ -1586,15 +1843,22 @@ async function importFiles(fileList) {
     }
     const sidecarKey = file.name.replace(/\.[^.]+$/, '').toLowerCase();
     const relativeKey = (file.webkitRelativePath || file.name).replace(/\.[^.]+$/, '').toLowerCase();
-    const sidecarLyrics = lyricMap.get(sidecarKey.replace(/\s+/g, ''))
-      || lyricMap.get(relativeKey.replace(/\s+/g, ''))
+    // 先按「相对路径」查，再退回文件名：不同文件夹里同名的 01.mp3 很常见，
+    // 只按文件名查会把别的专辑的 .lrc 配到这首歌上。
+    const sidecarLyrics = lyricMap.get(relativeKey.replace(/\s+/g, ''))
+      || lyricMap.get(sidecarKey.replace(/\s+/g, ''))
       || lyricMap.get(sidecarKey.replace(/\s+/g, '').split(/[./]/)[0]);
     let lyrics = metadata.lyrics || (sidecarLyrics ? parseLyrics(sidecarLyrics) : []);
     if (!lyrics.length && sourcePath && window.orangeDesktop?.readSidecarLyrics) {
       const sidecar = await window.orangeDesktop.readSidecarLyrics(sourcePath).catch(() => null);
       if (sidecar?.text) lyrics = parseLyrics(sidecar.text);
     }
-    const duration = await probeDuration(url);
+    // ALAC / WMA / APE 这类 Chromium 原生不支持，让 <audio> 探测时长会白等错误/超时，
+    // 直接读文件头更快；其余格式仍用 <audio> 探测（对 VBR 更准），失败再退回文件头。
+    let duration = 0;
+    if (/\.(alac|wma|ape)$/i.test(file.name)) duration = await readDuration(file).catch(() => 0);
+    else duration = await probeDuration(url);
+    if (!duration) duration = await readDuration(file).catch(() => 0);
     const tech = await readTechInfo(file).catch(() => ({}));
     if (state.prefs.onlySongs && !looksLikeSong({ name: file.name, filePath: sourcePath, metadata, seconds: duration })) {
       skipped += 1;
@@ -1607,6 +1871,7 @@ async function importFiles(fileList) {
     const title = metadata.title || nameParts.title || file.name.replace(/\.[^.]+$/, '');
     const artist = metadata.artist || nameParts.artist || '未知音乐人';
     const id = `f${Date.now()}${added}`;
+    const replayGain = Number(metadata.replayGain);
     state.songs.push({
       id,
       title,
@@ -1616,18 +1881,23 @@ async function importFiles(fileList) {
       duration: duration || 0,
       cover: coverUrl,
       source:'本地导入',
-      _src:url,
+      // 有磁盘路径时不用 blob URL：blob 会把整个 File 对象钉在内存里，
+      // 导入上万首后常驻内存非常可观。播放时由 resolveTrackSource() 按路径惰性解析。
+      _src: sourcePath ? '' : url,
       _fileName:file.name,
       _file:file,
       _path:sourcePath,
       _size: file.size || 0,
       _tech: tech,
+      _replayGain: Number.isFinite(replayGain) ? replayGain : null,
       _lyrics:lyrics
     });
+    if (sourcePath) URL.revokeObjectURL(url);
     state.queue.push(id);
     added += 1;
+    if (!firstAddedId) firstAddedId = id;
     state.importedIds.push(id);
-    knownPaths.add(sourcePath.toLowerCase());
+    if (sourcePath) knownPaths.add(sourcePath.toLowerCase());
     reportProgress();
   }
   progressBar.style.width = '100%';
@@ -1646,8 +1916,10 @@ async function importFiles(fileList) {
     : (added ? `已识别 ${added} 首本地歌曲` : '没有新的歌曲需要添加'));
   // 导入结束后顺手回收不再被引用的封面，避免封面目录随着反复导入慢慢变大
   pruneOrphanCovers();
-  if (state.prefs.autoplayImport && state.importedIds.length) {
-    playTrack(state.importedIds[0]);
+  // 导入后自动播放「本次新增的第一首」，而不是 state.importedIds[0]
+  // （那是本次运行里第一次导入的第一首；第二次导入会点开一首老歌）
+  if (state.prefs.autoplayImport && firstAddedId) {
+    playTrack(firstAddedId);
   }
 }
 
@@ -1689,7 +1961,10 @@ function audioBufferToWav(buffer) {
 }
 
 async function recoverUnsupportedTrack(track) {
-  if (!track?._file || track._recovered) return false;
+  if (!track || track._recovered) return false;
+  // 有磁盘路径就用随包的 ffmpeg 转码。注意这里不能要求 _file 存在：
+  // 重启后从资料库恢复的歌曲、自动扫描进来的歌曲都没有 File 对象，
+  // 原先的 `!track._file` 判断会让 ALAC / WMA / APE 在重启后全部无法播放。
   if (track._path && window.orangeDesktop?.convertAudio) {
     try {
       const convertedUrl = await window.orangeDesktop.convertAudio(track._path);
@@ -1702,6 +1977,8 @@ async function recoverUnsupportedTrack(track) {
       console.warn('FFmpeg conversion failed', error);
     }
   }
+  // 只有当前会话里拖进来、手头还有 File 对象的歌曲，才能走 WebAudio 解码兜底
+  if (!track._file) return false;
   const context = new (window.AudioContext || window.webkitAudioContext)();
   try {
     const encoded = await track._file.arrayBuffer();
@@ -1790,14 +2067,14 @@ function renderLyrics() {
     const glowText = escapeHtml(String(line.text)).replaceAll(' ', '&nbsp;');
     return `<p class="lyric-line" data-lyric-index="${index}" data-time="${line.time}" data-text="${glowText}">${chars}</p>`;
   }).join('');
-  lyrics.forEach(line => { delete line._charTimes; });
   cacheLyricNodes(container);
   updateLyricsActive();
 }
 
-// 每个字的点亮时间：优先用逐字时间轴，没有就按整句时长均分
+// 每个字的点亮时间：优先用逐字时间轴，没有就按整句时长均分。
+// 这里刻意不缓存：歌词偏移量（右键微调 / 设置页滑杆）随时会变，
+// 旧实现把结果存在 line._charTimes 上，改了偏移后整句会平移、逐字点亮却还停在旧位置。
 function charTimeline(line, nextLine) {
-  if (line._charTimes) return line._charTimes;
   const chars = [...String(line.text)];
   const times = [];
   const start = line.time;
@@ -1819,7 +2096,6 @@ function charTimeline(line, nextLine) {
       times[i] = start + ((end - start) * i) / Math.max(1, chars.length);
     }
   }
-  line._charTimes = times;
   return times;
 }
 
@@ -1922,7 +2198,8 @@ function updateLyricsActive(forceScroll = false) {
     }
   }
   updateKaraoke(lyrics, active, position);
-  if (state.playing && (changed || forceScroll) && (!lyricsManualScroll || forceScroll)) {
+  // 暂停时点「回到当前」也应该滚过去；旧条件要求 state.playing 为真，暂停状态下按钮等于失效。
+  if ((state.playing || forceScroll) && (changed || forceScroll) && (!lyricsManualScroll || forceScroll)) {
     const activeLine = lyricLineNodes[active];
     const scroller = $('#lyricsScroll');
     if (activeLine && scroller) {
@@ -1974,9 +2251,19 @@ function updateKaraoke(lyrics, active, position) {
 }
 
 function showPage(page) {
+  const changed = state.page !== page;
   state.page = page;
   $$('.page').forEach(section => section.classList.toggle('active', section.id === `${page}Page`));
   $$( '.nav-item, .sidebar-link[data-page]' ).forEach(button => button.classList.toggle('active', button.dataset.page === page));
+  if (!changed) return;
+  // 搜索词只属于搜索页。离开搜索页时不清掉的话，「歌曲」列表会继续被这个看不见的词过滤，
+  // 用户会以为资料库里的歌丢了。真正的搜索结果是独立渲染的，不受影响。
+  if (page !== 'search' && state.query) {
+    state.query = '';
+    const input = $('#globalSearch');
+    if (input) input.value = '';
+    renderLocalTracks();
+  }
   window.scrollTo({ top:0, behavior:'smooth' });
 }
 
@@ -1993,10 +2280,12 @@ function setTitleBarTone(mode) {
   // 高度与主进程建窗时用的 TITLE_BAR_HEIGHT 保持一致。
   desktop.setTitleBarOverlay({
     color: 'rgba(0,0,0,0)',
+    // 深色歌词页用浅色符号；浅色歌词页和主界面用深色符号，否则白符号压在浅背景上完全看不见
     symbolColor: mode === 'full' ? '#f4f4f5' : '#17181b',
     height: TITLE_BAR_HEIGHT
   });
   document.body.classList.toggle('tone-full', mode === 'full');
+  document.body.classList.toggle('tone-light', mode === 'light');
 }
 
 function toggleWindowMaximize() {
@@ -2020,15 +2309,20 @@ function initTitleBar() {
 
 function openFullPlayer() {
   $('#fullPlayer').classList.add('open');
-  setTimeout(() => setTitleBarTone('full'), 80);
+  // 立即按当前歌词主题切标题栏符号色，不再延时 80ms（快速开关会留下错误颜色的竞态）
+  setTitleBarTone(state.prefs.lyricTheme === 'light' ? 'light' : 'full');
   $('#fullPlayer').setAttribute('aria-hidden','false');
   document.body.style.overflow = 'hidden';
   renderLyrics();
+  applyLyricTheme();
   const track = getTrack(state.currentId);
   if (track && track._path && !getLyrics(track).length && !track._lyricChecked) {
     track._lyricChecked = true;
     loadTrackLyrics(track).then(lines => {
-      if (lines.length) renderLyrics();
+      if (lines.length) {
+        renderLyrics();
+        pushDesktopLyricsState();
+      }
     });
   }
 }
@@ -2159,61 +2453,66 @@ function initPlayerStyleControls() {
   applyPlayerStyle();
 }
 
+// 当前「跟随封面」配色是按哪个封面算的；同一张封面重复调用直接跳过采样
+let lyricThemeCoverKey = '';
+
 function applyLyricTheme() {
   const player = $('#fullPlayer');
   const image = $('#fullCover');
   if (!player || !image) return;
   const mode = state.prefs.lyricTheme || 'cover';
+  const syncTitleBarTone = () => {
+    if (!player.classList.contains('open')) {
+      setTitleBarTone('main');
+      return;
+    }
+    setTitleBarTone(mode === 'light' ? 'light' : 'full');
+  };
 
   // 浅色 / 固定深色：不使用封面取色，交给 CSS 变量控制
   if (mode !== 'cover') {
+    lyricThemeCoverKey = '';
     player.style.backgroundColor = '';
     player.style.removeProperty('--lyric-cover-url');
     player.classList.add('lyric-plain');
     player.classList.toggle('lyric-light', mode === 'light');
     document.body.classList.toggle('lyric-light', mode === 'light');
-    if (player.classList.contains('open')) setTimeout(() => setTitleBarTone('full'), 0);
+    syncTitleBarTone();
     return;
   }
   player.classList.remove('lyric-plain', 'lyric-light');
   document.body.classList.remove('lyric-light');
 
-  const update = () => {
-    try {
-      const canvas = document.createElement('canvas');
-      canvas.width = 32;
-      canvas.height = 32;
-      const context = canvas.getContext('2d', { willReadFrequently: true });
-      context.drawImage(image, 0, 0, 32, 32);
-      const pixels = context.getImageData(0, 0, 32, 32).data;
-      let r = 0, g = 0, b = 0, count = 0;
-      for (let i = 0; i < pixels.length; i += 16) {
-        if (pixels[i + 3] > 20) {
-          r += pixels[i];
-          g += pixels[i + 1];
-          b += pixels[i + 2];
-          count += 1;
-        }
-      }
-      if (count) {
-        r = Math.round(r / count);
-        g = Math.round(g / count);
-        b = Math.round(b / count);
-        const darkR = Math.round(r * .30 + 12);
-        const darkG = Math.round(g * .30 + 16);
-        const darkB = Math.round(b * .30 + 14);
-        player.style.backgroundColor = `rgb(${darkR}, ${darkG}, ${darkB})`;
-        player.style.setProperty('--lyric-theme-color', `rgb(${r}, ${g}, ${b})`);
-        // 塞进 CSS 的 url("...") 里，路径中的引号 / 反斜杠必须转义，否则整条声明会失效
-        player.style.setProperty('--lyric-cover-url', `url("${String(image.src).replace(/["\\]/g, '\\$&')}")`);
-        // --lyric-theme-color 取的是平均值，容易偏灰；这里再算一份「主色」存进
-        // --cover-accent 给歌词辉光用。applyCoverAccent 内部有去重，重复调用无开销。
-        applyCoverAccent(image.src);
-        if (player.classList.contains('open')) setTimeout(() => setTitleBarTone('full'), 0);
-      }
-    } catch (error) {
-      console.warn('Unable to sample cover colors', error);
+  const coverUrl = String(image.src || '');
+  // 设置背景图不需要读像素，先无条件写进去。
+  // 旧实现把这一步放在 canvas 取色成功之后，而 file:// 图片会污染 canvas，
+  // getImageData 必然抛 SecurityError —— 结果「跟随封面」的背景永远是空的。
+  if (coverUrl) {
+    player.style.setProperty('--lyric-cover-url', `url("${coverUrl.replace(/["\\]/g, '\\$&')}")`);
+  } else {
+    player.style.removeProperty('--lyric-cover-url');
+  }
+
+  const key = `${mode}|${coverUrl}`;
+  if (key === lyricThemeCoverKey) {
+    syncTitleBarTone();
+    return;
+  }
+  lyricThemeCoverKey = key;
+
+  const update = async () => {
+    // 走和 --cover-accent 同一条采样链路（主进程解码成 data URL），
+    // 避开 file:// 直接 drawImage 导致的 canvas 污染。
+    const rgb = await applyCoverAccent(coverUrl);
+    if (lyricThemeCoverKey !== key) return; // 采样期间切歌 / 换主题，丢弃过期结果
+    if (Array.isArray(rgb) && rgb.length === 3) {
+      const [r, g, b] = rgb;
+      player.style.backgroundColor = `rgb(${Math.round(r * .30 + 12)}, ${Math.round(g * .30 + 16)}, ${Math.round(b * .30 + 14)})`;
+      player.style.setProperty('--lyric-theme-color', `rgb(${r}, ${g}, ${b})`);
+    } else {
+      player.style.backgroundColor = '';
     }
+    syncTitleBarTone();
   };
 
   image.onload = update;
@@ -2467,6 +2766,7 @@ document.addEventListener('click', event => {
   }
 
   if (event.target.closest('[data-add-new]')) {
+    pendingNewPlaylistIds = [...(state.pendingAddIds || [])].filter(id => getTrack(id));
     $('#addModal').close();
     $('#playlistModal').showModal();
     setTimeout(() => $('#playlistName').focus(),50);
@@ -2541,6 +2841,7 @@ document.addEventListener('click', event => {
   if (action === 'open-queue') toggleQueue(true);
   if (action === 'close-queue') toggleQueue(false);
   if (action === 'open-lyrics') openFullPlayer();
+  if (action === 'open-desktop-lyrics') toggleDesktopLyrics();
   if (action === 'open-more') {
     if (state.currentId && getTrack(state.currentId)) openAddModal(state.currentId);
     else showToast('还没有正在播放的歌曲');
@@ -2564,6 +2865,11 @@ $('#fullFavorite').addEventListener('click', () => toggleFavorite());
   slider.addEventListener('pointerdown', () => { seeking = true; });
   slider.addEventListener('change', () => { seekFromSlider(slider); seeking = false; });
   slider.addEventListener('pointerup', () => { seekFromSlider(slider); seeking = false; });
+});
+// 在滑块外面松手时 pointerup 不会落到滑块上，seeking 一旦卡在 true，
+// 进度条就再也不跟着播放更新了。兜底在 window 上复位。
+['pointerup', 'pointercancel'].forEach(type => {
+  window.addEventListener(type, () => { seeking = false; }, { passive: true });
 });
 
 ['#volumeSlider', '#fullVolumeSlider'].forEach(selector => {
@@ -2685,8 +2991,8 @@ $('#featurePlay').addEventListener('click', () => {
 });
 $('#featureImport')?.addEventListener('click', () => showPage('import'));
 
-audio.addEventListener('play', () => { state.playing = true; updatePlayIcons(); updateLyricsActive(); });
-audio.addEventListener('pause', () => { state.playing = false; updatePlayIcons(); updateLyricsActive(); });
+audio.addEventListener('play', () => { state.playing = true; updatePlayIcons(); updateLyricsActive(); pushDesktopLyricsState(); });
+audio.addEventListener('pause', () => { state.playing = false; updatePlayIcons(); updateLyricsActive(); pushDesktopLyricsState(); });
 audio.addEventListener('timeupdate', updateProgress);
 audio.addEventListener('loadedmetadata', () => {
   const track = getTrack(state.currentId);
@@ -2713,8 +3019,16 @@ $('#pageChooseFiles').addEventListener('click', () => $('#pageFileInput').click(
 $('#homeChooseFiles')?.addEventListener('click', () => $('#pageFileInput').click());
 $('#pageChooseFolder').addEventListener('click', () => $('#pageFolderInput').click());
 $('#homeChooseFolder')?.addEventListener('click', () => $('#pageFolderInput').click());
-$('#pageFileInput').addEventListener('change', event => importFiles(event.target.files));
-$('#pageFolderInput').addEventListener('change', event => importFiles(event.target.files));
+// 清空 value 才能再次选择同一批文件（否则 change 不会触发）。
+// importFiles 会在第一个 await 之前把 FileList 复制成数组，所以这里先调用再清空是安全的。
+$('#pageFileInput').addEventListener('change', event => {
+  importFiles(event.target.files);
+  event.target.value = '';
+});
+$('#pageFolderInput').addEventListener('change', event => {
+  importFiles(event.target.files);
+  event.target.value = '';
+});
 ['dragenter','dragover'].forEach(type => $('#pageDropZone').addEventListener(type, event => {
   event.preventDefault();
   $('#pageDropZone').classList.add('drag');
@@ -2723,21 +3037,45 @@ $('#pageFolderInput').addEventListener('change', event => importFiles(event.targ
   event.preventDefault();
   $('#pageDropZone').classList.remove('drag');
 }));
-$('#pageDropZone').addEventListener('drop', event => importFiles(event.dataTransfer.files));
+$('#pageDropZone').addEventListener('drop', async event => {
+  const files = await filesFromDataTransfer(event.dataTransfer);
+  importFiles(files);
+});
 
 $('#playlistForm').addEventListener('submit', event => {
   event.preventDefault();
   const name = $('#playlistName').value.trim();
   if (!name) return;
-  state.playlists.push({ id:`p${Date.now()}`, name, tracks:[] });
+  const playlist = { id:`p${Date.now()}`, name, tracks:[] };
+  // 来自「添加到歌单 → 新建歌单」时，顺手把待加入的歌曲放进新歌单
+  const pending = pendingNewPlaylistIds.filter(id => getTrack(id));
+  pendingNewPlaylistIds = [];
+  pending.forEach(id => {
+    if (!playlist.tracks.includes(id)) playlist.tracks.push(id);
+  });
+  state.playlists.push(playlist);
+  state.pendingAddIds = [];
+  state.pendingAddId = null;
   saveState();
+  saveLibrary();
   renderPlaylists();
   renderCounts();
   $('#playlistName').value = '';
   $('#playlistModal').close();
   showPage('library');
   showTab('playlists');
-  showToast(`已创建歌单“${name}”`);
+  showToast(pending.length
+    ? `已创建歌单“${name}”并加入 ${pending.length} 首歌曲`
+    : `已创建歌单“${name}”`);
+});
+
+// 取消弹窗时把待加入列表清掉，避免下一次「新建歌单」莫名其妙多出上次选中的歌
+$('#addModal').addEventListener('close', () => {
+  state.pendingAddIds = [];
+  state.pendingAddId = null;
+});
+$('#playlistModal').addEventListener('close', () => {
+  pendingNewPlaylistIds = [];
 });
 
 // ---------- 弹窗 / 托盘 相关监听 ----------
@@ -2774,12 +3112,14 @@ $('#infoShowInFolder')?.addEventListener('click', () => {
 });
 $('#infoEdit')?.addEventListener('click', () => openEditModal(infoTrackId));
 $('#infoImportLyrics')?.addEventListener('click', () => {
-  if (infoTrackId) state.currentId = infoTrackId;
+  // 歌词导入的目标是「信息弹窗里的那首歌」，不能顺手改 state.currentId：
+  // 改了会让播放器的高亮 / 标题指向另一首歌，而 audio 还在放原来那首。
+  state.lyricImportId = infoTrackId;
   $('#infoModal')?.close();
   $('#lyricsFileInput').click();
 });
 $('#infoPasteLyrics')?.addEventListener('click', () => {
-  if (infoTrackId) state.currentId = infoTrackId;
+  state.lyricImportId = infoTrackId;
   $('#infoModal')?.close();
   $('#lyricsModal').showModal();
 });
@@ -2790,11 +3130,27 @@ window.orangeDesktop?.onTrayCommand?.(command => {
   else if (command === 'next') nextTrack();
 });
 
+// 桌面歌词窗口的播放控制命令（随机 / 上一曲 / 播放暂停 / 下一曲 / 循环）
+window.orangeDesktop?.onDesktopLyricsCommand?.(action => {
+  if (action === 'play-pause') togglePlayback();
+  else if (action === 'prev') previousTrack();
+  else if (action === 'next') nextTrack();
+  else if (action === 'shuffle') toggleShuffleMode();
+  else if (action === 'repeat') cycleRepeatMode();
+});
+
 $('#lyricsScroll').addEventListener('click', event => {
   const line = event.target.closest('[data-time]');
   if (line) {
-    audio.currentTime = Math.max(0, Number(line.dataset.time) - currentLyricOffset());
-    if (audio.paused) togglePlayback();
+    const target = Math.max(0, Number(line.dataset.time) - currentLyricOffset());
+    // 还没装载音源时给 audio.currentTime 赋值会抛异常（歌词可能已经先读出来了），
+    // 这时只负责开始播放，等用户下一次点击再精确跳转。
+    if (audio.src) {
+      audio.currentTime = target;
+      if (audio.paused) togglePlayback();
+    } else if (state.currentId) {
+      togglePlayback();
+    }
     resumeLyricsAutoScroll(true);
   }
 });
@@ -2848,6 +3204,12 @@ $('#lyricMenu')?.addEventListener('click', event => {
     state.songs.forEach(song => { song._lyricOffset = null; });
     savePrefs();
     saveLibrary();
+    // 设置页滑杆 / 数值也要跟着走，否则界面显示的还是旧值
+    const slider = $('#lyricOffset');
+    if (slider) slider.value = String(state.prefs.lyricOffset);
+    applyLyricStyle();
+    activeLineIndex = -1;
+    updateLyricsActive(true);
     showToast(`已把 ${formatOffset(state.prefs.lyricOffset)} 应用为所有歌曲的默认值`);
     return;
   }
@@ -2885,34 +3247,67 @@ $('#reloadLyricsButton')?.addEventListener('click', async () => {
   showToast('正在重新读取歌词…');
   const lines = await loadTrackLyrics(track);
   renderLyrics();
+  pushDesktopLyricsState();
   showToast(lines.length
     ? (track._lyricSource === 'embedded' ? `已从文件内读取到 ${lines.length} 行歌词` : `已从同名歌词文件读取到 ${lines.length} 行歌词`)
     : '这首歌里没有找到歌词文件或内嵌歌词');
 });
+// 手动导入 / 粘贴的歌词统一走这里：写进歌曲对象、落库、必要时刷新当前歌词界面。
+// 原来这两条路径只改内存，连 saveLibrary 都没调用，重启后手动歌词必然丢失。
+function applyManualLyrics(track, text) {
+  if (!track) return false;
+  const value = String(text || '').slice(0, 200000);
+  if (!value.trim()) return false;
+  track._lyrics = parseLyrics(value);
+  track._lyricManual = true;
+  track._lyricText = value;
+  track._lyricSource = 'manual';
+  track._lyricChecked = true;
+  track._lyricPath = '';
+  saveLibrary();
+  if (state.currentId === track.id) renderLyrics();
+  return true;
+}
+
 $('#lyricsFileInput').addEventListener('change', async event => {
   const file = event.target.files[0];
+  event.target.value = ''; // 允许再次选择同一个文件
   if (!file) return;
-  const text = await file.text();
-  const track = getTrack(state.currentId);
-  track._lyrics = parseLyrics(text);
-  track._lyricManual = true;
-  track._lyricSource = 'manual';
-  renderLyrics();
-  showToast(`已导入歌词：${file.name}`);
+  const track = getTrack(state.lyricImportId || state.currentId);
+  state.lyricImportId = null;
+  if (!track) {
+    showToast('没有可以导入歌词的歌曲');
+    return;
+  }
+  try {
+    // 用 decodeTextBuffer 而不是 file.text()：后者只按 UTF-8 解码，
+    // 中文用户手里大量 GBK / UTF-16 的 .lrc 会直接变成乱码。
+    const text = decodeTextBuffer(await file.arrayBuffer());
+    if (!applyManualLyrics(track, text)) {
+      showToast('这个歌词文件是空的');
+      return;
+    }
+    showToast(`已为「${track.title}」导入歌词：${file.name}`);
+  } catch (error) {
+    console.warn(error);
+    showToast('读取歌词文件失败');
+  }
 });
 $('#pasteLyricsButton')?.addEventListener('click', () => $('#lyricsModal').showModal());
 $('#lyricsForm').addEventListener('submit', event => {
   event.preventDefault();
   const text = $('#lyricsInput').value.trim();
   if (!text) return;
-  const track = getTrack(state.currentId);
-  track._lyrics = parseLyrics(text);
-  track._lyricManual = true;
-  track._lyricSource = 'manual';
-  renderLyrics();
+  const track = getTrack(state.lyricImportId || state.currentId);
+  state.lyricImportId = null;
+  if (!track) {
+    showToast('没有可以保存歌词的歌曲');
+    return;
+  }
+  applyManualLyrics(track, text);
   $('#lyricsModal').close();
   $('#lyricsInput').value = '';
-  showToast('歌词已保存');
+  showToast(`歌词已保存到「${track.title}」`);
 });
 
 // ============================ 新增功能：外观 / 歌词 / 详情 / 编辑 / 查重 / 歌单 / 自动扫描 ============================
@@ -2989,7 +3384,10 @@ function bindSettingsControls() {
     preset.value = state.prefs.eqPreset || 'flat';
     preset.addEventListener('change', () => {
       state.prefs.eqPreset = preset.value;
-      state.prefs.eqGains = [...(EQ_PRESETS[preset.value] || EQ_PRESETS.flat)];
+      //「自定义」取用户存档；其余取内置预设表
+      state.prefs.eqGains = preset.value === 'custom'
+        ? normalizedCustomEq()
+        : [...(EQ_PRESETS[preset.value] || EQ_PRESETS.flat)];
       applyEq();
       renderEqSliders();
       savePrefs();
@@ -2998,15 +3396,24 @@ function bindSettingsControls() {
   $$('.eq-slider').forEach(slider => {
     slider.addEventListener('input', () => {
       const gains = normalizedEqGains();
-      gains[Number(slider.dataset.band)] = Number(slider.value);
+      const value = Number(slider.value);
+      gains[Number(slider.dataset.band)] = value;
       state.prefs.eqGains = gains;
       state.prefs.eqEnabled = true;
+      // 手动拖过就不等于任何内置预设了 —— 下拉切到「自定义」，
+      // 免得出现"显示着『摇滚』、实际却不是摇滚那条曲线"的错位。
+      if (state.prefs.eqPreset !== 'custom') {
+        state.prefs.eqPreset = 'custom';
+        if (preset) preset.value = 'custom';
+      }
       const toggle = $('#eqToggle');
       if (toggle) toggle.checked = true;
+      syncEqBandValue(slider, value);
       applyEq();
       savePrefs();
     });
   });
+  initEqCustomSave(preset);
   renderEqSliders();
   $('#addWatchFolder')?.addEventListener('click', addWatchFolder);
   renderWatchList();
@@ -3034,12 +3441,47 @@ function bindRange(selector, key, format, onChange, options = {}) {
   input.addEventListener('input', sync);
 }
 
+/** 把滑块当前值写到它上方的 <output>；非 0 时加 is-active 标红，一眼看出哪些频段调过 */
+function syncEqBandValue(slider, value) {
+  const output = slider.closest('.eq-band')?.querySelector('.eq-value');
+  if (!output) return;
+  const number = Number(value) || 0;
+  output.textContent = formatEqDb(number);
+  output.classList.toggle('is-active', number !== 0);
+}
+
 function renderEqSliders() {
   const gains = normalizedEqGains();
   $$('.eq-slider').forEach(slider => {
     const value = gains[Number(slider.dataset.band)] || 0;
     slider.value = String(value);
     slider.title = `${value > 0 ? '+' : ''}${value} dB`;
+    syncEqBandValue(slider, value);
+  });
+}
+
+/**
+ * 「保存当前设置」按钮：把当前十段增益存进 eqCustom，并把预设切到「自定义」。
+ * 存档和当前值分开存，所以之后随便切别的预设、再切回「自定义」都能找回来。
+ */
+function initEqCustomSave(presetSelect) {
+  const button = $('#eqSaveCustom');
+  if (!button) return;
+  const label = button.textContent;
+  let timer = 0;
+  button.addEventListener('click', () => {
+    state.prefs.eqCustom = normalizedEqGains();
+    state.prefs.eqPreset = 'custom';
+    if (presetSelect) presetSelect.value = 'custom';
+    savePrefs();
+    // 轻量反馈：按钮短暂变成「已保存」，不弹窗打断操作
+    button.textContent = '已保存';
+    button.disabled = true;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      button.textContent = label;
+      button.disabled = false;
+    }, 1200);
   });
 }
 
@@ -3057,6 +3499,84 @@ function currentLyricOffset() {
 function formatOffset(value) {
   const number = Number(value) || 0;
   return `${number > 0 ? '+' : ''}${number.toFixed(2)} 秒`;
+}
+
+// ============================================================
+// 桌面歌词悬浮窗
+// 独立于主窗口的透明置顶窗口，Apple Music 风格。主窗口在这里把
+// 播放状态（时间 / 歌词 / 标题 / 封面）与外观配置实时推给它。
+// ============================================================
+
+let desktopLyricsOpen = false;
+let lastDesktopLyricsPush = 0;
+
+/** 组装当前外观配置并推给桌面歌词窗口 */
+function pushDesktopLyricsConfig() {
+  if (!window.orangeDesktop?.sendDesktopLyricsConfig) return;
+  const p = state.prefs;
+  window.orangeDesktop.sendDesktopLyricsConfig({
+    blur: Number(p.dlBlur) ?? 28,
+    opacity: (Number(p.dlOpacity) ?? 35) / 100,
+    fontSize: Number(p.dlFontSize) ?? 34,
+    textColor: p.dlTextColor || '#ffffff',
+    textDepth: Number(p.dlTextDepth) ?? 100,
+    accentColor: p.dlAccentColor || '#e84b3c',
+    bgColor: p.dlBgColor || '',
+    align: p.dlAlign || 'center',
+    radius: Number(p.dlRadius) ?? 18,
+    showMeta: p.dlShowMeta !== false,
+    showBg: true,
+    offset: currentLyricOffset(),
+    locked: p.dlLocked === true
+  });
+}
+
+/**
+ * 组装播放状态并推给桌面歌词窗口。
+ * 由 updateProgress（timeupdate 约每秒 4 次）驱动，足够歌词逐字点亮。
+ * 歌词数组每次都带：之前按引用去重会导致「主进程缓存的最新状态不含 lyrics 字段」，
+ * 歌词窗打开时回拉到的就是空歌词（表现为首次打开不显示、切歌才出现）。歌词几百行文本
+ * 每秒 4 次 IPC 开销可忽略，正确性优先。
+ */
+function pushDesktopLyricsState() {
+  // 不检查 desktopLyricsOpen：窗口可能由托盘直接打开，此时主窗口的
+  // desktopLyricsOpen 标志还没同步，检查会漏掉推送导致「不显示歌词」。
+  // 主进程在窗口未打开时会直接丢弃消息，开销可忽略。
+  if (!window.orangeDesktop?.sendDesktopLyricsState) return;
+  const track = getTrack(state.currentId);
+  const lyrics = track ? getLyrics(track) : [];
+  window.orangeDesktop.sendDesktopLyricsState({
+    playing: state.playing,
+    time: audio.currentTime || 0,
+    title: track ? track.title : '',
+    artist: track ? track.artist : '',
+    shuffle: Boolean(state.shuffle),
+    repeat: Number(state.repeat) || 0,
+    lyrics
+  });
+}
+
+/** 切换桌面歌词窗口的显示状态，返回是否已打开 */
+async function toggleDesktopLyrics(open) {
+  if (!window.orangeDesktop?.toggleDesktopLyrics) {
+    showToast('当前环境不支持桌面歌词');
+    return false;
+  }
+  const target = open !== undefined ? open : !desktopLyricsOpen;
+  desktopLyricsOpen = await window.orangeDesktop.toggleDesktopLyrics(target);
+  if (desktopLyricsOpen) {
+    // 窗口刚创建，先下发一次配置，再推一次当前状态
+    pushDesktopLyricsConfig();
+    // 歌词可能还没加载（刚启动就开歌词窗的场景），主动补一次加载，加载完会自动推状态
+    const track = getTrack(state.currentId);
+    if (track && track._path && !getLyrics(track).length && !track._lyricChecked) {
+      track._lyricChecked = true;
+      loadTrackLyrics(track).then(() => pushDesktopLyricsState());
+    } else {
+      pushDesktopLyricsState();
+    }
+  }
+  return desktopLyricsOpen;
 }
 
 function openLyricMenu(x, y) {
@@ -3230,19 +3750,49 @@ function glowColor(rgb) {
 }
 
 // 把封面主色写进 --cover-accent，歌词辉光会优先用它
+let coverAccentRgb = null;
+let coverAccentPromise = null;
+
+/** 相对路径（assets/...）转绝对 URL，让 track.cover 与 img.src 能命中同一份采样缓存 */
+function absoluteCoverUrl(cover) {
+  const value = String(cover || '');
+  if (!value || /^(?:data|https?|file):/i.test(value)) return value;
+  try {
+    return new URL(value, window.location.href).href;
+  } catch (error) {
+    return value;
+  }
+}
+
 async function applyCoverAccent(cover) {
-  const url = String(cover || '');
-  if (url === coverAccentUrl) return;
+  const url = absoluteCoverUrl(cover);
+  const nodes = [$('#fullPlayer'), document.body, document.documentElement].filter(Boolean);
+  if (!url) {
+    coverAccentUrl = '';
+    coverAccentRgb = null;
+    coverAccentPromise = null;
+    nodes.forEach(node => node.style.removeProperty('--cover-accent'));
+    return null;
+  }
+  // 命中同一张封面时返回「同一个采样 Promise」，而不是立刻返回 null。
+  // 否则 updatePlayerUi 里先后两次调用（主色 + 歌词背景）时，第二次会在采样完成前
+  // 拿到 null，背景色就永远不更新了。
+  if (url === coverAccentUrl) return coverAccentPromise;
   coverAccentUrl = url;
-  const rgb = await sampleDominantColor(url);
-  // 采样是异步的，期间可能已经切歌，过期结果直接丢掉
-  if (coverAccentUrl !== url) return;
-  const value = rgb ? glowColor(rgb) : '';
-  [$('#fullPlayer'), document.body, document.documentElement].forEach(node => {
-    if (!node) return;
-    if (value) node.style.setProperty('--cover-accent', value);
-    else node.style.removeProperty('--cover-accent');
-  });
+  coverAccentRgb = null;
+  coverAccentPromise = (async () => {
+    const rgb = await sampleDominantColor(url);
+    // 采样是异步的，期间可能已经切歌，过期结果直接丢掉
+    if (coverAccentUrl !== url) return null;
+    coverAccentRgb = rgb;
+    const value = rgb ? glowColor(rgb) : '';
+    nodes.forEach(node => {
+      if (value) node.style.setProperty('--cover-accent', value);
+      else node.style.removeProperty('--cover-accent');
+    });
+    return rgb;
+  })();
+  return coverAccentPromise;
 }
 
 // ---------- 歌词界面「立体向内倾斜 + 投影」效果 ----------
@@ -3927,7 +4477,16 @@ function syncWindowBehavior() {
 
 // ---------- 快捷键自定义 ----------
 function shortcutMap() {
-  return { ...DEFAULT_SHORTCUTS, ...(state.prefs.shortcutKeys || {}) };
+  const saved = state.prefs.shortcutKeys && typeof state.prefs.shortcutKeys === 'object'
+    ? state.prefs.shortcutKeys
+    : {};
+  const map = { ...DEFAULT_SHORTCUTS };
+  // 旧版本 / 手工改过的 localStorage 里可能存着 null、数字之类的值，
+  // 直接拿去做 combo.split() 会在启动渲染快捷键列表时抛错。
+  Object.keys(DEFAULT_SHORTCUTS).forEach(action => {
+    if (typeof saved[action] === 'string' && saved[action]) map[action] = saved[action];
+  });
+  return map;
 }
 
 function formatShortcutKey(event) {
@@ -4087,7 +4646,9 @@ function saveEditForm(event) {
   track.title = $('#editTitle').value.trim() || track.title;
   track.artist = $('#editArtist').value.trim() || '未知音乐人';
   track.album = $('#editAlbum').value.trim() || track.album;
-  track.cover = editingCoverUrl || track.cover;
+  // 点「恢复默认」后 editingCoverUrl 是空串，这里必须真的换回默认封面；
+  // 写成 `|| track.cover` 会让「恢复默认」静默失效。
+  track.cover = editingCoverUrl || DEFAULT_COVER;
   track._edited = true;
   saveLibrary();
   renderAll();
@@ -4285,7 +4846,8 @@ async function songFromScanRecord(record, knownPaths) {
     _path: record.path,
     _lyrics: Array.isArray(record.lyrics) ? record.lyrics : [],
     _size: Number(record.size) || 0,
-    _tech: record.tech || {}
+    _tech: record.tech || {},
+    _replayGain: Number.isFinite(Number(record.replayGain)) ? Number(record.replayGain) : null
   };
   state.songs.push(song);
   state.queue.push(song.id);
@@ -4300,10 +4862,11 @@ async function runAutoScan({ silent = false } = {}) {
     return 0;
   }
   if (!silent) showToast('正在扫描文件夹…');
-  const records = await window.orangeDesktop.scanFolders(folders).catch(() => []);
-  let added = 0;
-  // 已收录路径先建表，避免在循环里对每条记录都遍历一次资料库（曲库大时是 O(n×m)）
+  // 已收录路径先建表：一方面主进程可以直接跳过这些文件（不用重新解析标签 / 抽封面），
+  // 另一方面下面 songFromScanRecord 也复用它，避免对每条记录遍历一次资料库。
   const knownPaths = new Set(state.songs.map(song => String(song._path || '').toLowerCase()).filter(Boolean));
+  const records = await window.orangeDesktop.scanFolders(folders, [...knownPaths]).catch(() => []);
+  let added = 0;
   for (const record of records) {
     if (await songFromScanRecord(record, knownPaths)) added += 1;
   }
@@ -4731,17 +5294,126 @@ function initSettings() {
   document.body.classList.toggle('no-cover-backdrop', !state.prefs.lyricBackdrop);
   document.body.classList.toggle('show-waveform', Boolean(state.prefs.waveform));
   initPlayerStyleControls();
+  initDesktopLyricsControls();
+}
+
+/** 桌面歌词设置项绑定：开关 + 各外观滑块/取色器，改动即推给悬浮窗 */
+function initDesktopLyricsControls() {
+  // 悬浮窗被外部关闭（点 ✕ / 托盘）时，同步主窗口的开关状态
+  if (window.orangeDesktop?.onDesktopLyricsClosed) {
+    window.orangeDesktop.onDesktopLyricsClosed(() => {
+      desktopLyricsOpen = false;
+      state.prefs.desktopLyrics = false;
+      savePrefs();
+      syncDesktopLyricsToggle();
+    });
+  }
+  // 悬浮窗点「设置」时，跳到设置页并定位到桌面歌词区块
+  if (window.orangeDesktop?.onOpenDesktopLyricsSettings) {
+    window.orangeDesktop.onOpenDesktopLyricsSettings(() => {
+      showPage('settings');
+      setTimeout(() => {
+        const section = $('#desktopLyricsSection');
+        if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 120);
+    });
+  }
+
+  // 开关：显示/隐藏桌面歌词悬浮窗
+  const toggle = $('#desktopLyricsToggle');
+  if (toggle) {
+    toggle.checked = Boolean(state.prefs.desktopLyrics);
+    toggle.addEventListener('change', async () => {
+      state.prefs.desktopLyrics = toggle.checked;
+      savePrefs();
+      await toggleDesktopLyrics(toggle.checked);
+      syncDesktopLyricsToggle();
+    });
+  }
+  const openBtn = $('#dlOpenBtn');
+  if (openBtn) {
+    openBtn.addEventListener('click', async () => {
+      const on = await toggleDesktopLyrics();
+      state.prefs.desktopLyrics = on;
+      savePrefs();
+      syncDesktopLyricsToggle();
+    });
+  }
+
+  // 各外观参数：改了就下发配置
+  bindRange('#dlFontSize', 'dlFontSize', v => `${v} px`, () => { savePrefs(); pushDesktopLyricsConfig(); }, { number: true });
+  bindRange('#dlTextDepth', 'dlTextDepth', v => `${v}%`, () => { savePrefs(); pushDesktopLyricsConfig(); }, { number: true });
+  bindRange('#dlBlur', 'dlBlur', v => `${v} px`, () => { savePrefs(); pushDesktopLyricsConfig(); }, { number: true });
+  bindRange('#dlOpacity', 'dlOpacity', v => `${v}%`, () => { savePrefs(); pushDesktopLyricsConfig(); }, { number: true });
+  bindRange('#dlRadius', 'dlRadius', v => `${v} px`, () => { savePrefs(); pushDesktopLyricsConfig(); }, { number: true });
+
+  const colorBind = (selector, key) => {
+    const input = $(selector);
+    if (!input) return;
+    input.value = state.prefs[key] || (key === 'dlBgColor' ? '#121216' : '#ffffff');
+    input.addEventListener('input', () => {
+      state.prefs[key] = input.value;
+      savePrefs();
+      pushDesktopLyricsConfig();
+    });
+  };
+  colorBind('#dlTextColor', 'dlTextColor');
+  colorBind('#dlAccentColor', 'dlAccentColor');
+  colorBind('#dlBgColor', 'dlBgColor');
+
+  // 「背景颜色」的「自动」按钮：清空背景色，恢复「由歌词颜色自动推导深浅」
+  const bgAutoBtn = $('#dlBgAuto');
+  const bgColorInput = $('#dlBgColor');
+  if (bgAutoBtn && bgColorInput) {
+    bgAutoBtn.addEventListener('click', () => {
+      state.prefs.dlBgColor = '';
+      bgColorInput.value = '#121216'; // 仅作显示占位，实际 pref 为空走自动推导
+      savePrefs();
+      pushDesktopLyricsConfig();
+    });
+  }
+
+  const align = $('#dlAlign');
+  if (align) {
+    align.value = state.prefs.dlAlign || 'center';
+    align.addEventListener('change', () => {
+      state.prefs.dlAlign = align.value;
+      savePrefs();
+      pushDesktopLyricsConfig();
+    });
+  }
+
+  bindSwitch('#dlShowMetaToggle', 'dlShowMeta', () => pushDesktopLyricsConfig());
+  bindSwitch('#dlLockedToggle', 'dlLocked', () => pushDesktopLyricsConfig());
+}
+
+/** 让开关与「显示桌面歌词」按钮的状态和悬浮窗实际开关保持一致 */
+function syncDesktopLyricsToggle() {
+  const toggle = $('#desktopLyricsToggle');
+  if (toggle) toggle.checked = desktopLyricsOpen;
+  const openBtn = $('#dlOpenBtn');
+  if (openBtn) openBtn.textContent = desktopLyricsOpen ? '隐藏桌面歌词' : '显示桌面歌词';
 }
 
 async function bootstrap() {
   const restored = await restoreLibrary().catch(() => 0);
   state.favorites = new Set([...state.favorites].filter(id => getTrack(id)));
   state.recent = state.recent.filter(id => getTrack(id));
+  // 歌单里可能留着已被移除 / 磁盘上已不存在的歌曲 id，启动时一并摘掉
+  state.playlists.forEach(playlist => {
+    playlist.tracks = playlist.tracks.filter(id => getTrack(id));
+  });
   if (restored) {
     saveState();
     saveLibrary();
     // 只有资料库确实读出来了才回收封面；读失败（restored = 0）时宁可什么都不做
     pruneOrphanCovers();
+  }
+
+  // 睡眠定时器是会话级的：上次关闭时即使还开着，重启后也不该显示「15 分钟」却根本不计时
+  if (Number(state.prefs.sleepTimer)) {
+    state.prefs.sleepTimer = 0;
+    savePrefs();
   }
 
   const restoredTrackId = readStored('orange-last-track', '');
@@ -4767,6 +5439,7 @@ async function bootstrap() {
       if (lines.length) {
         renderLyricSource();
         renderLyrics();
+        pushDesktopLyricsState();
       }
     });
   }
@@ -4786,6 +5459,13 @@ async function bootstrap() {
   if (restored) showToast(`已恢复 ${restored} 首本地歌曲`);
   if (state.prefs.autoScanOnStart && (state.prefs.watchFolders || []).length) {
     setTimeout(() => runAutoScan({ silent: true }), 1200);
+  }
+
+  // 上次关闭前开着桌面歌词的话，启动后自动恢复（窗口稍后一点再显示，避免抢焦点）
+  if (state.prefs.desktopLyrics) {
+    setTimeout(() => {
+      toggleDesktopLyrics(true).then(syncDesktopLyricsToggle);
+    }, 800);
   }
 }
 

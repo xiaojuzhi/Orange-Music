@@ -280,7 +280,7 @@
         </section>
 
         <section class="content-section settings-section">
-          <div class="section-header"><div><h2>均衡器</h2><p class="section-subtitle">五段均衡，调整不同频段的声音</p></div>
+          <div class="section-header"><div><h2>均衡器</h2><p class="section-subtitle">十段均衡，调整不同频段的声音</p></div>
             <input type="checkbox" class="switch" id="eqToggle" />
           </div>
           <div class="settings-list">
@@ -296,32 +296,38 @@
                 <option value="treble">高音增强</option>
                 <option value="jazz">爵士</option>
                 <option value="electronic">电子</option>
+                <option value="custom">自定义</option>
               </select>
             </label>
             <div class="setting-row eq-row">
               <span><strong>十段增益</strong><small>单位 dB，范围 -12 ~ +12，拖动竖条调节</small></span>
               <div class="eq-bands" id="eqBands">
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="0" min="-12" max="12" step="1" value="0" /><span>31</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="1" min="-12" max="12" step="1" value="0" /><span>62</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="2" min="-12" max="12" step="1" value="0" /><span>125</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="3" min="-12" max="12" step="1" value="0" /><span>250</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="4" min="-12" max="12" step="1" value="0" /><span>500</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="5" min="-12" max="12" step="1" value="0" /><span>1k</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="6" min="-12" max="12" step="1" value="0" /><span>2k</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="7" min="-12" max="12" step="1" value="0" /><span>4k</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="8" min="-12" max="12" step="1" value="0" /><span>8k</span></label>
-                <label class="eq-band"><input type="range" class="eq-slider" data-band="9" min="-12" max="12" step="1" value="0" /><span>16k</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="0" min="-12" max="12" step="1" value="0" /><span>31</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="1" min="-12" max="12" step="1" value="0" /><span>62</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="2" min="-12" max="12" step="1" value="0" /><span>125</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="3" min="-12" max="12" step="1" value="0" /><span>250</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="4" min="-12" max="12" step="1" value="0" /><span>500</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="5" min="-12" max="12" step="1" value="0" /><span>1k</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="6" min="-12" max="12" step="1" value="0" /><span>2k</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="7" min="-12" max="12" step="1" value="0" /><span>4k</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="8" min="-12" max="12" step="1" value="0" /><span>8k</span></label>
+                <label class="eq-band"><output class="eq-value">0</output><input type="range" class="eq-slider" data-band="9" min="-12" max="12" step="1" value="0" /><span>16k</span></label>
               </div>
+            </div>
+            <div class="setting-row">
+              <span><strong>保存自定义</strong><small>把当前十段增益存成「自定义」，之后从上面「预设」里选「自定义」即可恢复</small></span>
+              <button type="button" class="button secondary small" id="eqSaveCustom">保存当前设置</button>
             </div>
           </div>
         </section>
 
         <section class="content-section settings-section">
           <div class="section-header">
-            <div><h2>播放浮窗</h2><p class="section-subtitle">主界面底部播放栏的背景效果</p></div>
+            <div><h2>界面背景</h2><p class="section-subtitle">主播放浮窗与左侧功能栏的毛玻璃背景效果</p></div>
             <div class="player-effect-preview" id="playerEffectPreview">Orange Music</div>
           </div>
           <div class="settings-list">
+            <div class="settings-group-label">主播放浮窗</div>
             <label class="setting-row">
               <span><strong>背景效果</strong><small>选择浮窗背景的处理方式</small></span>
               <select id="playerEffect" class="select-input">
@@ -339,12 +345,31 @@
               <span><strong>透明程度</strong><small>数值越小浮窗越通透</small></span>
               <span class="range-wrap"><input id="playerOpacity" class="range-input" type="range" min="10" max="100" value="84" /><output id="playerOpacityValue">84%</output></span>
             </label>
+            <div class="settings-group-label">左侧功能栏</div>
+            <label class="setting-row">
+              <span><strong>背景效果</strong><small>选择侧边栏背景的处理方式</small></span>
+              <select id="sidebarEffect" class="select-input">
+                <option value="blur">模糊</option>
+                <option value="acrylic">亚克力</option>
+                <option value="translucent">半透明</option>
+                <option value="gaussian">高斯模糊</option>
+              </select>
+            </label>
+            <label class="setting-row">
+              <span><strong>模糊程度</strong><small>数值越大背景越模糊</small></span>
+              <span class="range-wrap"><input id="sidebarBlur" class="range-input" type="range" min="0" max="60" value="26" /><output id="sidebarBlurValue">26 px</output></span>
+            </label>
+            <label class="setting-row">
+              <span><strong>透明程度</strong><small>数值越小侧边栏越通透</small></span>
+              <span class="range-wrap"><input id="sidebarOpacity" class="range-input" type="range" min="10" max="100" value="78" /><output id="sidebarOpacityValue">78%</output></span>
+            </label>
           </div>
         </section>
 
         <section class="content-section settings-section">
           <div class="section-header"><div><h2>歌词界面</h2><p class="section-subtitle">全屏歌词页的显示效果</p></div></div>
           <div class="settings-list">
+            <div class="settings-group-label">基础显示</div>
             <label class="setting-row">
               <span><strong>歌词字号</strong><small>调整歌词文字的大小</small></span>
               <span class="range-wrap"><input id="lyricSize" class="range-input" type="range" min="18" max="44" value="30" /><output id="lyricSizeValue">30 px</output></span>
@@ -359,6 +384,15 @@
               <span class="range-wrap"><input id="lyricBlur" class="range-input" type="range" min="0" max="4" step="0.5" value="0" /><output id="lyricBlurValue">0 px</output></span>
             </label>
             <label class="setting-row"><span><strong>显示翻译歌词</strong><small>双语歌词默认只显示原文；打开后把译文行也一起显示（译文与原文共用同一个时间戳）</small></span><input type="checkbox" class="switch" id="lyricTranslationToggle" /></label>
+            <label class="setting-row">
+              <span><strong>歌词界面配色</strong><small>深色 / 浅色 / 跟随封面颜色</small></span>
+              <select id="lyricTheme" class="select-input">
+                <option value="cover">跟随封面</option>
+                <option value="dark">深色</option>
+                <option value="light">浅色</option>
+              </select>
+            </label>
+            <div class="settings-group-label">立体倾斜</div>
             <label class="setting-row"><span><strong>歌词倾斜 + 字后字影</strong><small>歌词整体斜着显示；每句歌词背后都压着一层影子，当前行最重、其余行更浅（光从左上打来）</small></span><input type="checkbox" class="switch" id="tiltLyricsToggle" /></label>
             <label class="setting-row"><span><strong>封面区倾斜 + 投影</strong><small>歌词界面里的封面、歌名与播放控件整体倾斜</small></span><input type="checkbox" class="switch" id="tiltStageToggle" /></label>
             <label class="setting-row">
@@ -379,6 +413,7 @@
                 <option value="left">左侧向后</option>
               </select>
             </label>
+            <div class="settings-group-label">氛围灯</div>
             <label class="setting-row"><span><strong>右侧氛围灯</strong><small>歌词右侧漫一片跟着封面主题色走的柔雾，会随音乐的低频一起涨缩呼吸（换歌自动换色）</small></span><input type="checkbox" class="switch" id="ambientLightToggle" /></label>
             <label class="setting-row"><span><strong>左侧氛围灯</strong><small>在歌词左边再对称漫一片同样的柔雾，和右侧同色同步、一起随低频涨缩（可单独关掉）</small></span><input type="checkbox" class="switch" id="ambientLeftToggle" /></label>
             <label class="setting-row"><span><strong>闪光跃动</strong><small>让柔雾跟着低音鼓点明显起伏：鼓点一到，雾从边缘大幅张开并提亮，节律感强。关闭时是原来那版柔和的缓慢呼吸</small></span><input type="checkbox" class="switch" id="ambientFlashToggle" /></label>
@@ -386,14 +421,61 @@
               <span><strong>动态强度</strong><small>柔雾跟着音乐起伏的幅度。无级可调，100% 为标准，往左更含蓄、往右更澎湃，0% 基本不动；配合「闪光跃动」可以调出很强的鼓点张缩</small></span>
               <span class="range-wrap"><input id="ambientPower" class="range-input" type="range" min="0" max="180" step="5" value="100" /><output id="ambientPowerValue">100%</output></span>
             </label>
+          </div>
+        </section>
+
+        <section class="content-section settings-section" id="desktopLyricsSection">
+          <div class="section-header">
+            <div><h2>桌面歌词</h2><p class="section-subtitle">独立置顶悬浮的桌面歌词窗，Apple Music 风格</p></div>
+            <button type="button" class="button secondary small" id="dlOpenBtn"><svg class="icon"><use href="#i-audio-lines"/></svg>显示桌面歌词</button>
+          </div>
+          <div class="settings-list">
+            <label class="setting-row"><span><strong>显示桌面歌词</strong><small>在桌面置顶显示一个透明的歌词悬浮窗，可拖动、随播放实时滚动</small></span><input type="checkbox" class="switch" id="desktopLyricsToggle" /></label>
+            <div class="settings-group-label">文字</div>
             <label class="setting-row">
-              <span><strong>歌词界面配色</strong><small>深色 / 浅色 / 跟随封面颜色</small></span>
-              <select id="lyricTheme" class="select-input">
-                <option value="cover">跟随封面</option>
-                <option value="dark">深色</option>
-                <option value="light">浅色</option>
+              <span><strong>歌词字号</strong><small>桌面歌词文字大小</small></span>
+              <span class="range-wrap"><input id="dlFontSize" class="range-input" type="range" min="16" max="64" value="34" /><output id="dlFontSizeValue">34 px</output></span>
+            </label>
+            <label class="setting-row">
+              <span><strong>歌词颜色深度</strong><small>数值越大文字越实越清晰，越小越淡</small></span>
+              <span class="range-wrap"><input id="dlTextDepth" class="range-input" type="range" min="30" max="100" value="100" /><output id="dlTextDepthValue">100%</output></span>
+            </label>
+            <label class="setting-row">
+              <span><strong>歌词颜色</strong><small>歌词正文颜色</small></span>
+              <input type="color" id="dlTextColor" class="color-input" value="#ffffff" />
+            </label>
+            <label class="setting-row">
+              <span><strong>强调颜色</strong><small>逐字点亮与发光的高亮色</small></span>
+              <input type="color" id="dlAccentColor" class="color-input" value="#e84b3c" />
+            </label>
+            <div class="settings-group-label">背景</div>
+            <label class="setting-row">
+              <span><strong>背景模糊</strong><small>毛玻璃效果，数值越大越模糊</small></span>
+              <span class="range-wrap"><input id="dlBlur" class="range-input" type="range" min="0" max="60" value="28" /><output id="dlBlurValue">28 px</output></span>
+            </label>
+            <label class="setting-row">
+              <span><strong>背景不透明度</strong><small>数值越小越通透</small></span>
+              <span class="range-wrap"><input id="dlOpacity" class="range-input" type="range" min="0" max="100" value="35" /><output id="dlOpacityValue">35%</output></span>
+            </label>
+            <label class="setting-row">
+              <span><strong>圆角</strong><small>歌词窗四角圆润程度</small></span>
+              <span class="range-wrap"><input id="dlRadius" class="range-input" type="range" min="0" max="40" value="18" /><output id="dlRadiusValue">18 px</output></span>
+            </label>
+            <label class="setting-row">
+              <span><strong>背景颜色</strong><small>留空则由歌词颜色自动推导深浅；点「自动」恢复自动推导</small></span>
+              <span class="color-row"><input type="color" id="dlBgColor" class="color-input" value="#121216" /><button type="button" class="button secondary small" id="dlBgAuto">自动</button></span>
+            </label>
+            <div class="settings-group-label">行为</div>
+            <label class="setting-row">
+              <span><strong>对齐方式</strong><small>歌词行在悬浮窗内的水平位置</small></span>
+              <select id="dlAlign" class="select-input">
+                <option value="left">居左</option>
+                <option value="center" selected>居中</option>
+                <option value="right">居右</option>
               </select>
             </label>
+            <label class="setting-row"><span><strong>显示歌名歌手</strong><small>在歌词上方显示正在播放的歌曲信息</small></span><input type="checkbox" class="switch" id="dlShowMetaToggle" checked /></label>
+            <label class="setting-row"><span><strong>锁定悬浮窗</strong><small>锁定后不可拖动（避免误触移动）</small></span><input type="checkbox" class="switch" id="dlLockedToggle" /></label>
           </div>
         </section>
 
@@ -464,33 +546,19 @@
         </section>
 
         <section class="content-section settings-section">
-          <div class="section-header"><div><h2>窗口与启动</h2><p class="section-subtitle">托盘、开机自启等系统行为</p></div></div>
+          <div class="section-header"><div><h2>启动与窗口</h2><p class="section-subtitle">托盘、开机自启与软件打开时的行为</p></div></div>
           <div class="settings-list">
+            <div class="settings-group-label">系统行为</div>
             <label class="setting-row"><span><strong>最小化到托盘</strong><small>点最小化时隐藏到右下角托盘图标</small></span><input type="checkbox" class="switch" id="minimizeToTrayToggle" /></label>
             <label class="setting-row"><span><strong>关闭时最小化到托盘</strong><small>点关闭按钮时继续后台播放</small></span><input type="checkbox" class="switch" id="closeToTrayToggle" /></label>
             <label class="setting-row"><span><strong>开机自动启动</strong><small>开机后自动打开 Orange Music</small></span><input type="checkbox" class="switch" id="autoStartToggle" /></label>
-          </div>
-        </section>
-
-        <section class="content-section settings-section">
-          <div class="section-header"><div><h2>左侧功能栏</h2><p class="section-subtitle">侧边栏背景效果</p></div></div>
-          <div class="settings-list">
+            <div class="settings-group-label">启动与导入</div>
+            <label class="setting-row"><span><strong>启动时恢复上次歌曲</strong><small>打开软件后停留在上次播放的歌曲</small></span><input type="checkbox" class="switch" id="restoreToggle" checked /></label>
+            <label class="setting-row"><span><strong>导入后自动播放</strong><small>扫描完成立即播放第一首歌曲</small></span><input type="checkbox" class="switch" id="autoplayImportToggle" /></label>
+            <label class="setting-row"><span><strong>只导入歌曲</strong><small>自动跳过音效、提示音、语音等非歌曲音频</small></span><input type="checkbox" class="switch" id="onlySongsToggle" checked /></label>
             <label class="setting-row">
-              <span><strong>背景效果</strong><small>选择侧边栏背景的处理方式</small></span>
-              <select id="sidebarEffect" class="select-input">
-                <option value="blur">模糊</option>
-                <option value="acrylic">亚克力</option>
-                <option value="translucent">半透明</option>
-                <option value="gaussian">高斯模糊</option>
-              </select>
-            </label>
-            <label class="setting-row">
-              <span><strong>模糊程度</strong><small>数值越大背景越模糊</small></span>
-              <span class="range-wrap"><input id="sidebarBlur" class="range-input" type="range" min="0" max="60" value="26" /><output id="sidebarBlurValue">26 px</output></span>
-            </label>
-            <label class="setting-row">
-              <span><strong>透明程度</strong><small>数值越小侧边栏越通透</small></span>
-              <span class="range-wrap"><input id="sidebarOpacity" class="range-input" type="range" min="10" max="100" value="78" /><output id="sidebarOpacityValue">78%</output></span>
+              <span><strong>歌曲最短时长</strong><small>短于该时长的音频会被当成音效跳过</small></span>
+              <span class="range-wrap"><input id="minSongSeconds" class="range-input" type="range" min="10" max="120" step="5" value="30" /><output id="minSongSecondsValue">30 秒</output></span>
             </label>
           </div>
         </section>
@@ -504,19 +572,6 @@
             <label class="setting-row"><span><strong>启用快捷键</strong><small>关闭后仍保留 Ctrl+K 搜索与 Esc 返回</small></span><input type="checkbox" class="switch" id="shortcutToggle" checked /></label>
           </div>
           <div class="shortcut-list" id="shortcutList"></div>
-        </section>
-
-        <section class="content-section settings-section">
-          <div class="section-header"><div><h2>启动与导入</h2><p class="section-subtitle">软件打开和扫描歌曲时的行为</p></div></div>
-          <div class="settings-list">
-            <label class="setting-row"><span><strong>启动时恢复上次歌曲</strong><small>打开软件后停留在上次播放的歌曲</small></span><input type="checkbox" class="switch" id="restoreToggle" checked /></label>
-            <label class="setting-row"><span><strong>导入后自动播放</strong><small>扫描完成立即播放第一首歌曲</small></span><input type="checkbox" class="switch" id="autoplayImportToggle" /></label>
-            <label class="setting-row"><span><strong>只导入歌曲</strong><small>自动跳过音效、提示音、语音等非歌曲音频</small></span><input type="checkbox" class="switch" id="onlySongsToggle" checked /></label>
-            <label class="setting-row">
-              <span><strong>歌曲最短时长</strong><small>短于该时长的音频会被当成音效跳过</small></span>
-              <span class="range-wrap"><input id="minSongSeconds" class="range-input" type="range" min="10" max="120" step="5" value="30" /><output id="minSongSecondsValue">30 秒</output></span>
-            </label>
-          </div>
         </section>
       </section>
 
@@ -583,6 +638,7 @@
 
     <div class="mini-tools">
       <button class="icon-button" data-action="open-lyrics" aria-label="歌词" title="歌词"><svg class="icon"><use href="#i-lyrics"/></svg></button>
+      <button class="icon-button" data-action="open-desktop-lyrics" aria-label="桌面歌词" title="桌面歌词（置顶悬浮窗）"><svg class="icon"><use href="#i-audio-lines"/></svg></button>
       <button class="icon-button" data-action="open-queue" aria-label="播放队列" title="播放队列"><svg class="icon"><use href="#i-list"/></svg></button>
       <div class="volume-control">
         <button class="icon-button" id="volumeButton" aria-label="音量" title="音量"><svg class="icon"><use href="#i-volume"/></svg></button>

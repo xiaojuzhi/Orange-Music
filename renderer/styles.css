@@ -1458,6 +1458,20 @@ body::-webkit-scrollbar-thumb {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+.color-input {
+  width: 46px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface2);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.color-input::-webkit-color-swatch-wrapper { padding: 0; }
+.color-input::-webkit-color-swatch { border: none; border-radius: 6px; }
+/* 颜色选择器 + 附加按钮并排（如「背景颜色」的「自动」） */
+.color-row { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .player-effect-preview {
   min-width: 180px;
   padding: 12px 18px;
@@ -2014,6 +2028,19 @@ body.no-cover-backdrop .full-player::before { display: none; }
 .settings-section { padding-top: 30px; }
 .settings-section .section-header { align-items: flex-end; gap: 14px; }
 .settings-list { border-radius: 12px; }
+/* 设置分组小标题：把长 section 里的设置项再细分，视觉上更清晰 */
+.settings-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 18px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .4px;
+  color: var(--muted);
+  text-transform: none;
+}
+.settings-group-label:first-child { padding-top: 12px; }
 .settings-list .setting-row {
   flex-direction: row;
   align-items: center;
@@ -2515,6 +2542,16 @@ body.theme-sakura {
   width: 6px;
   accent-color: var(--accent);
 }
+/* 频段数值：未调整是灰色 0，调过之后变强调色，一眼看出改动过哪些频段 */
+.eq-band .eq-value {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  min-height: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.eq-band .eq-value.is-active { color: var(--accent); }
 
 .watch-list { display: grid; gap: 8px; margin-top: 12px; }
 .watch-row {

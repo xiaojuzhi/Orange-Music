@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>桌面歌词</title>
+  <style>
+    :root {
+      /* 由主窗口通过 IPC 推送覆盖，默认值保证开箱即用 */
+      --dl-bg: rgba(16, 16, 20, 0.28);
+      --dl-blur: 24px;
+      --dl-text: #ffffff;
+      --dl-text-dim: rgba(255, 255, 255, 0.62);
+      --dl-text-alpha: 1;
+      --dl-text-depth: 0.85;
+      --dl-accent: #ff5f52;
+      --dl-glow: rgba(255, 95, 82, 0.35);
+      --dl-font-size: 34px;
+      --dl-align: center;
+      --dl-radius: 16px;
+      --dl-show-meta: 1;
+      --dl-glow-ring: rgba(255, 255, 255, 0.85);
+      --dl-glow-ring-soft: rgba(255, 255, 255, 0.20);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+      cursor: grab;
+      /* 四周留出非 drag 的透明边缘：app-region:drag 铺满会吞掉 Windows 的缩放手柄，
+         留 6px 边缘后窗口边缘即可自由拉大拉小。 */
+      padding: 6px;
+    }
+    body:active { cursor: grabbing; }
+
+    /* 窗口缩放手柄：透明无边框窗口没有 OS 原生 resize 边框，这里手动放置
+       8 个 no-drag 手柄（四边 + 四角），mousedown 后经 IPC 调主进程 setBounds。
+       手柄跨越 wrap 内外各 6px（宽 12px），保证好抓取。 */
+    .rz {
+      position: absolute;
+      -webkit-app-region: no-drag;
+      z-index: 10;
+      pointer-events: auto;
+    }
+    .rz-n { top: 0; left: 12px; right: 12px; height: 12px; cursor: ns-resize; }
+    .rz-s { bottom: 0; left: 12px; right: 12px; height: 12px; cursor: ns-resize; }
+    .rz-w { left: 0; top: 12px; bottom: 12px; width: 12px; cursor: ew-resize; }
+    .rz-e { right: 0; top: 12px; bottom: 12px; width: 12px; cursor: ew-resize; }
+    .rz-nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+    .rz-ne { top: 0; right: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+    .rz-sw { bottom: 0; left: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+    .rz-se { bottom: 0; right: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+
+    /* 可拖动的歌词容器：无阴影（透明窗口下阴影会漏成黑边） */
+    .lyrics-wrap {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 18px 36px;
+      border-radius: var(--dl-radius);
+      overflow: hidden;
+      background: var(--dl-bg);
+      /* 用原生 app-region:drag 拖动窗口（最稳、不会漂移/变大），
+         hover 光效改由主进程窗口级检测光标位置后推送 .hovered 类。 */
+      -webkit-app-region: drag;
+      border: none;
+    }
+
+    /* 毛玻璃层：靠 backdrop-filter 制造模糊，圆角与容器一致 */
+    .lyrics-wrap::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      backdrop-filter: blur(var(--dl-blur)) saturate(1.35);
+      -webkit-backdrop-filter: blur(var(--dl-blur)) saturate(1.35);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* 发光光圈：悬停整个窗口时显示，颜色同步字体颜色。
+       用 inset 阴影（完全在窗口内部）避免透明窗口下阴影漏成黑边。
+       由 JS 监听 mouseenter/mouseleave 给 .lyrics-wrap 加 .hovered 类控制，
+       不再依赖 :hover（app-region:drag 会吞掉 hover）。 */
+    .lyrics-wrap::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      z-index: 2;
+      opacity: 0;
+      transition: opacity .22s ease;
+      box-shadow:
+        inset 0 0 0 1.5px var(--dl-glow-ring),
+        inset 0 0 0 6px var(--dl-glow-ring-soft),
+        inset 0 0 26px var(--dl-glow-ring-soft);
+    }
+    .lyrics-wrap.hovered::after { opacity: 1; }
+
+    /* 顶部元信息：歌名 + 歌手 */
+    .lyrics-meta {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      margin-bottom: 4px;
+      opacity: var(--dl-show-meta);
+      max-width: 100%;
+    }
+    .lyrics-meta .title {
+      color: var(--dl-text);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: .3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 72vw;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, calc(.35 * var(--dl-text-depth)));
+    }
+    .lyrics-meta .artist {
+      color: var(--dl-text);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: .3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 72vw;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, calc(.35 * var(--dl-text-depth)));
+    }
+
+    /* 歌词舞台：滑窗模式只渲染「当前行 + 前后各 2 行」，当前行居中、逐字点亮。
+       不做 mask 渐隐、不做滚动裁切（那是「显示不全 / 歌词消失」的根源）。 */
+    .lyrics-stage {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .lyrics-list {
+      width: 100%;
+      text-align: var(--dl-align);
+    }
+
+    .line {
+      font-size: var(--dl-font-size);
+      line-height: 1.45;
+      font-weight: 700;
+      padding: 5px 0;
+      color: var(--dl-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: color .26s ease, transform .26s ease, opacity .26s ease;
+      transform: scale(.94);
+      opacity: calc(var(--dl-text-alpha) * .55);
+      /* 轻投影托底：透明背景/亮色壁纸上文字依然可读，但不做重描边（避免立体感过强） */
+      text-shadow: 0 1px 3px rgba(0, 0, 0, calc(.35 * var(--dl-text-depth)));
+    }
+    /* 当前行：提亮放大，浓度由「歌词颜色深度」控制 */
+    .line.active {
+      color: var(--dl-text);
+      transform: scale(1);
+      opacity: var(--dl-text-alpha);
+      text-shadow:
+        0 1px 4px rgba(0, 0, 0, calc(.4 * var(--dl-text-depth))),
+        0 0 14px var(--dl-glow);
+    }
+    /* 逐字：inline-block 才能动 transform；未点亮与其它行同色，点亮后 accent 色 */
+    .line .ch {
+      display: inline-block;
+      transition: color .22s ease, opacity .22s ease;
+      will-change: transform, color;
+    }
+    /* 当前行的字：未播放的字与其它行歌词同色（半透明文字本色），播放到的字 accent 色全亮 */
+    .line.active .ch { color: var(--dl-text); opacity: .55; }
+    .line.active .ch.on {
+      color: var(--dl-accent);
+      opacity: 1;
+      animation: ch-idle 3.6s ease-in-out infinite;
+    }
+    /* 点亮瞬间的弹跳（浮动一下），0.5s 后回落 */
+    .line.active .ch.pop { animation: ch-pop .5s ease; }
+    @keyframes ch-pop {
+      0% { transform: translateY(0) scale(1); }
+      35% { transform: translateY(-5px) scale(1.12); }
+      100% { transform: translateY(0) scale(1); }
+    }
+    @keyframes ch-idle {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-4px); }
+    }
+    .line.silent {
+      opacity: .3;
+      font-size: calc(var(--dl-font-size) * .7);
+    }
+
+    /* 无歌词占位 */
+    .lyrics-empty {
+      color: var(--dl-text-dim);
+      font-size: calc(var(--dl-font-size) * .55);
+      text-align: center;
+      z-index: 1;
+      position: relative;
+      letter-spacing: .5px;
+    }
+
+    /* 悬浮工具按钮：统一圆形半透明底 + 细线图标，悬停整个窗口才显示 */
+    .lyrics-tools {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      z-index: 3;
+      display: flex;
+      gap: 6px;
+      opacity: 0;
+      transition: opacity .18s ease;
+      -webkit-app-region: no-drag;
+    }
+    .lyrics-wrap.hovered .lyrics-tools { opacity: 1; }
+    .lyrics-tools button {
+      width: 26px;
+      height: 26px;
+      border: none;
+      border-radius: 50%;
+      /* 无底色，只保留细线图标；加一点投影保证透明背景/亮色壁纸上依然清晰 */
+      background: transparent;
+      color: var(--dl-text);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      transition: transform .15s ease, opacity .15s ease;
+      opacity: .9;
+      filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .7));
+    }
+    .lyrics-tools button:hover { transform: scale(1.15); opacity: 1; }
+    .lyrics-tools button:active { transform: scale(.94); }
+    .lyrics-tools button svg {
+      width: 15px;
+      height: 15px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    /* 锁定状态：图标变实心强调（无底色） */
+    .lyrics-tools button.locked {
+      color: var(--dl-accent);
+    }
+    .lyrics-tools button.locked svg {
+      fill: currentColor;
+    }
+
+    /* 底部播放控制栏：放在歌词下方正常文档流（不做浮层、不遮挡歌词），
+       无底色黑框，只保留细线图标；悬停整个窗口才淡入。 */
+    .lyrics-controls {
+      position: relative;
+      z-index: 1;
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-top: 2px;
+      padding: 4px 0;
+      opacity: 0;
+      transition: opacity .18s ease;
+      -webkit-app-region: no-drag;
+      pointer-events: none;
+      filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .6));
+    }
+    .lyrics-wrap.hovered .lyrics-controls { opacity: 1; pointer-events: auto; }
+    .lyrics-controls button {
+      position: relative;
+      border: none;
+      background: transparent;
+      color: var(--dl-text);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      opacity: .9;
+      transition: transform .15s ease, color .15s ease, opacity .15s ease;
+    }
+    .lyrics-controls button:hover { transform: scale(1.15); opacity: 1; }
+    .lyrics-controls button:active { transform: scale(.94); }
+    .lyrics-controls button svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    /* 播放/暂停主键：更大的圆底（单一白色圆形，非黑色胶囊框） */
+    .lyrics-controls button.play-main {
+      width: 42px;
+      height: 42px;
+      background: var(--dl-text);
+      color: #16161a;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, .5);
+    }
+    .lyrics-controls button.play-main svg {
+      width: 20px;
+      height: 20px;
+      stroke-width: 2;
+      fill: currentColor;
+      stroke: none;
+    }
+    /* 暂停图标默认隐藏，暂停时切换 */
+    .lyrics-controls button.play-main .ic-pause { display: none; }
+    .lyrics-controls button.play-main.playing .ic-play { display: none; }
+    .lyrics-controls button.play-main.playing .ic-pause { display: block; }
+    /* 随机 / 循环激活态：强调色 */
+    .lyrics-controls button.active {
+      color: var(--dl-accent);
+    }
+    /* 循环里的「1」标记（单曲循环），用小圆点示意 */
+    .lyrics-controls button.repeat-one::after {
+      content: "1";
+      position: absolute;
+      font-size: 9px;
+      font-weight: 700;
+      transform: translate(7px, 6px);
+      color: var(--dl-accent);
+    }
+  </style>
+</head>
+<body>
+  <div class="lyrics-wrap" id="wrap">
+    <div class="lyrics-meta" id="meta">
+      <span class="title" id="metaTitle">Orange Music</span>
+      <span class="artist" id="metaArtist">桌面歌词</span>
+    </div>
+    <div class="lyrics-stage" id="stage">
+      <div class="lyrics-list" id="list"></div>
+    </div>
+    <div class="lyrics-tools" id="tools">
+      <button id="pinBtn" title="锁定（锁定后不可拖动）">
+        <svg viewBox="0 0 24 24"><path d="M12 17v5"/><path d="M9 3h6"/><path d="M7 3v7l-3 3v2h16v-2l-3-3V3"/><path d="M12 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>
+      </button>
+      <button id="settingsBtn" title="桌面歌词设置">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+      </button>
+      <button id="closeBtn" title="关闭桌面歌词">
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+    <!-- 播放控制栏：随机 / 上一曲 / 播放暂停 / 下一曲 / 循环，悬停整个窗口才显示 -->
+    <div class="lyrics-controls" id="controls">
+      <button id="shuffleBtn" title="随机播放">
+        <svg viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="M4 4l5 5"/></svg>
+      </button>
+      <button id="prevBtn" title="上一曲">
+        <svg viewBox="0 0 24 24"><path d="M6 6v12"/><path d="M19 6l-9 6 9 6Z"/></svg>
+      </button>
+      <button id="playBtn" class="play-main" title="播放/暂停">
+        <svg class="ic-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7Z"/></svg>
+        <svg class="ic-pause" viewBox="0 0 24 24"><path d="M9 5v14"/><path d="M15 5v14"/></svg>
+      </button>
+      <button id="nextBtn" title="下一曲">
+        <svg viewBox="0 0 24 24"><path d="M18 6v12"/><path d="M5 6l9 6-9 6Z"/></svg>
+      </button>
+      <button id="repeatBtn" title="循环播放">
+        <svg viewBox="0 0 24 24"><path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+      </button>
+    </div>
+  </div>
+  <!-- 缩放手柄（四边 + 四角，no-drag，透明窗口手动 resize 用） -->
+  <div class="rz rz-n" data-edge="n"></div>
+  <div class="rz rz-s" data-edge="s"></div>
+  <div class="rz rz-w" data-edge="w"></div>
+  <div class="rz rz-e" data-edge="e"></div>
+  <div class="rz rz-nw" data-edge="nw"></div>
+  <div class="rz rz-ne" data-edge="ne"></div>
+  <div class="rz rz-sw" data-edge="sw"></div>
+  <div class="rz rz-se" data-edge="se"></div>
+
+  <script>
+    (function () {
+      const desktop = window.orangeDesktop;
+      const list = document.getElementById('list');
+      const stage = document.getElementById('stage');
+      const wrap = document.getElementById('wrap');
+      const meta = document.getElementById('meta');
+      const metaTitle = document.getElementById('metaTitle');
+      const metaArtist = document.getElementById('metaArtist');
+      const pinBtn = document.getElementById('pinBtn');
+
+      let state = {
+        playing: false,
+        time: 0,
+        lyrics: [],
+        title: '',
+        artist: '',
+        shuffle: false,
+        repeat: 0
+      };
+      let activeIndex = -1;
+      let lineNodes = [];
+      let charNodes = [];
+      let offset = 0;
+      let locked = false;
+      let hovered = false;
+      // 歌词「内容指纹」：IPC 每次传输都是全新数组引用，不能用引用比较判断歌词是否变化。
+      // 用行数 + 首行/末行 time+text 生成轻量 key，只有内容真的变了才重建 DOM。
+      let lyricsKey = '';
+
+      const DEFAULT_CONFIG = {
+        blur: 24,
+        opacity: 0.28,
+        fontSize: 34,
+        textColor: '#ffffff',
+        textDepth: 100,
+        accentColor: '#ff5f52',
+        align: 'center',
+        radius: 16,
+        showMeta: true,
+        offset: 0,
+        locked: false
+      };
+      let config = { ...DEFAULT_CONFIG };
+
+      function applyConfig(cfg) {
+        config = { ...DEFAULT_CONFIG, ...(cfg || {}) };
+        const root = document.documentElement.style;
+
+        root.setProperty('--dl-blur', `${Math.max(0, Number(config.blur) || 0)}px`);
+        root.setProperty('--dl-font-size', `${Number(config.fontSize) || 34}px`);
+        root.setProperty('--dl-text', config.textColor || '#ffffff');
+        // 「歌词颜色深度」控制文字浓度与描边强度：100 = 最实、描边最深，调低则变淡变柔。
+        const depth = Math.max(0, Math.min(1, (Number(config.textDepth) ?? 100) / 100));
+        root.setProperty('--dl-text-alpha', depth.toFixed(3));
+        root.setProperty('--dl-text-depth', depth.toFixed(3));
+        // 非当前行颜色派生（半透明白），仅用于 .silent 等少量场景，正文颜色统一走 --dl-text
+        root.setProperty('--dl-text-dim', hexToRgba(config.textColor || '#ffffff', 0.6));
+        root.setProperty('--dl-accent', config.accentColor || '#ff5f52');
+        root.setProperty('--dl-align', config.align || 'center');
+        root.setProperty('--dl-radius', `${Number(config.radius) ?? 16}px`);
+        root.setProperty('--dl-show-meta', config.showMeta === false ? '0' : '1');
+        root.setProperty('--dl-glow', hexToRgba(config.accentColor || '#ff5f52', 0.35));
+
+        const bg = backgroundFromColor(config.textColor || '#ffffff', config.bgColor);
+        root.setProperty('--dl-bg', bg);
+
+        // 发光光圈颜色同步字体颜色：主环更实、内圈柔光更淡
+        const ringColor = config.textColor || '#ffffff';
+        root.setProperty('--dl-glow-ring', hexToRgba(ringColor, 0.85));
+        root.setProperty('--dl-glow-ring-soft', hexToRgba(ringColor, 0.20));
+
+        offset = Number(config.offset) || 0;
+        setLocked(config.locked === true);
+        meta.style.display = config.showMeta === false ? 'none' : 'flex';
+      }
+
+      function hexToRgba(hex, alpha) {
+        let h = String(hex || '').trim();
+        if (h.startsWith('#')) h = h.slice(1);
+        if (h.length === 3) h = h.split('').map(c => c + c).join('');
+        const n = parseInt(h, 16);
+        if (Number.isNaN(n)) return `rgba(255,95,82,${alpha})`;
+        const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+        return `rgba(${r},${g},${b},${alpha})`;
+      }
+
+      function backgroundFromColor(textHex, bgColor) {
+        const opacity = Math.min(1, Math.max(0, Number(config.opacity) ?? 0.28));
+        if (bgColor) return hexToRgba(bgColor, opacity);
+        let h = String(textHex || '#ffffff').trim().replace('#', '');
+        if (h.length === 3) h = h.split('').map(c => c + c).join('');
+        const n = parseInt(h, 16);
+        const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+        const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        return lum > 0.6 ? `rgba(16,16,20,${opacity})` : `rgba(255,255,255,${opacity})`;
+      }
+
+      function setLocked(value) {
+        locked = value === true;
+        pinBtn.classList.toggle('locked', locked);
+        pinBtn.title = locked ? '解锁（解锁后可拖动）' : '锁定（锁定后不可拖动）';
+        // 锁定时整窗不可拖动（no-drag），解锁后恢复原生拖动
+        wrap.style.webkitAppRegion = locked ? 'no-drag' : 'drag';
+      }
+
+      // ---------- 歌词渲染（滑窗模式） ----------
+      // Apple Music 风格：只渲染「当前行 + 前后各 2 行」的滑动窗口，当前行居中、
+      // 逐字点亮。不再渲染整首歌再滚动裁切（那是「显示不全 / 歌词消失」的根源）。
+      const WINDOW_HALF = 1; // 当前行前后各显示几行（Apple Music 风格：当前行 + 上下各 1 行）
+      let windowStart = -1;  // 当前渲染窗口在 lyrics 数组里的起始下标
+
+      function escapeHtml(value) {
+        return String(value ?? '')
+          .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
+      }
+
+      function renderLyrics() {
+        const lyrics = state.lyrics || [];
+        if (!lyrics.length) {
+          list.innerHTML = `<div class="lyrics-empty">暂无歌词</div>`;
+          lineNodes = [];
+          charNodes = [];
+          activeIndex = -1;
+          windowStart = -1;
+          return;
+        }
+        // 首次渲染：activeIndex 未知，先按当前时间定位，再重建窗口
+        locateActive();
+        renderWindow();
+      }
+
+      // 根据当前播放位置算出 active 行（不触碰 DOM）
+      function locateActive() {
+        const lyrics = state.lyrics || [];
+        if (!lyrics.length) { activeIndex = -1; return; }
+        const t = Number.isFinite(state.time) ? state.time : 0;
+        const position = t + 0.18 + offset;
+        let active = 0;
+        for (let i = 0; i < lyrics.length; i++) {
+          if (position >= lyrics[i].time) active = i;
+        }
+        activeIndex = active;
+      }
+
+      // 渲染滑窗：当前行居中，前后各 WINDOW_HALF 行
+      function renderWindow() {
+        const lyrics = state.lyrics || [];
+        if (!lyrics.length) return;
+        if (activeIndex < 0) activeIndex = 0;
+        const start = Math.max(0, activeIndex - WINDOW_HALF);
+        const end = Math.min(lyrics.length - 1, activeIndex + WINDOW_HALF);
+        windowStart = start;
+        list.innerHTML = lyrics.slice(start, end + 1).map((line, i) => {
+          const realIndex = start + i;
+          const text = String(line.text || '');
+          const chars = [...text].map((ch, ci) =>
+            `<span class="ch" data-i="${ci}">${ch === ' ' ? '&nbsp;' : escapeHtml(ch)}</span>`).join('');
+          const silent = text === '♪' ? ' silent' : '';
+          const activeCls = realIndex === activeIndex ? ' active' : '';
+          return `<div class="line${silent}${activeCls}" data-index="${realIndex}" data-time="${line.time}">${chars}</div>`;
+        }).join('');
+        lineNodes = [...list.children];
+        charNodes = lineNodes.map(node => [...node.querySelectorAll('.ch')]);
+        // 逐字点亮当前行
+        paintActiveChars();
+      }
+
+      // 每个字的点亮时间：优先逐字时间轴（words），否则按整句时长均分。
+      // 与主窗口歌词界面的 charTimeline 保持一致，实现「一个字一个字过」。
+      function charTimeline(line, nextLine) {
+        const chars = [...String(line.text)];
+        const times = [];
+        const start = line.time;
+        const end = nextLine ? Math.max(nextLine.time, start + .4) : start + 5;
+        if (line.words && line.words.length > 1) {
+          let cursor = 0;
+          line.words.forEach((word, index) => {
+            const wordChars = [...String(word.text)];
+            const nextWordTime = line.words[index + 1]?.time ?? end;
+            const span = Math.max(0.05, nextWordTime - word.time);
+            wordChars.forEach((_, i) => {
+              times[cursor] = word.time + (span * i) / Math.max(1, wordChars.length);
+              cursor += 1;
+            });
+          });
+        }
+        for (let i = 0; i < chars.length; i += 1) {
+          if (times[i] === undefined) {
+            times[i] = start + ((end - start) * i) / Math.max(1, chars.length);
+          }
+        }
+        return times;
+      }
+
+      // 只对当前 active 行做逐字点亮（点亮瞬间带 pop 弹跳）
+      function paintActiveChars() {
+        const lyrics = state.lyrics || [];
+        const line = lyrics[activeIndex];
+        const localIndex = activeIndex - windowStart;
+        const chars = charNodes[localIndex];
+        if (!line || !chars || !chars.length) return;
+        const t = Number.isFinite(state.time) ? state.time : 0;
+        const position = t + 0.18 + offset;
+        const times = charTimeline(line, lyrics[activeIndex + 1]);
+        const revealed = state.playing ? times.filter(time => position >= time).length : chars.length;
+        for (let i = 0; i < chars.length; i++) {
+          const node = chars[i];
+          const on = i < revealed;
+          if (on && !node.classList.contains('on')) {
+            node.classList.add('on', 'pop');
+            setTimeout(() => node.classList.remove('pop'), 500);
+          } else if (!on && node.classList.contains('on')) {
+            node.classList.remove('on', 'pop');
+          }
+        }
+      }
+
+      function updateActive() {
+        const lyrics = state.lyrics || [];
+        if (!lyrics.length || !lineNodes.length) return;
+        const prev = activeIndex;
+        locateActive();
+        // 当前行变化时才重建窗口；否则只刷新逐字点亮
+        if (activeIndex !== prev) {
+          renderWindow();
+        } else {
+          paintActiveChars();
+        }
+      }
+
+      // ---------- 状态接收 ----------
+      function lyricsFingerprint(arr) {
+        if (!Array.isArray(arr) || !arr.length) return 'empty';
+        const first = arr[0], last = arr[arr.length - 1];
+        return `${arr.length}|${first.time}|${first.text}|${last.time}|${last.text}`;
+      }
+
+      function onState(next) {
+        if (!next) return;
+        const hasLyrics = Array.isArray(next.lyrics);
+        // IPC 反序列化让数组引用每次不同，必须用内容指纹判断歌词是否真正变化。
+        const nextKey = hasLyrics ? lyricsFingerprint(next.lyrics) : '';
+        const lyricsChanged = hasLyrics && nextKey !== lyricsKey;
+        // 空歌词只在「确实切到没歌词的歌」时才清空；加载中的瞬时空歌词保留旧歌词。
+        const shouldReplace = lyricsChanged && (next.lyrics.length || !state.lyrics.length);
+
+        state.playing = next.playing === true;
+        if (typeof next.time === 'number' && Number.isFinite(next.time) && next.time >= 0) {
+          state.time = next.time;
+        }
+        if (typeof next.title === 'string') state.title = next.title;
+        if (typeof next.artist === 'string') state.artist = next.artist;
+        if (typeof next.shuffle === 'boolean') state.shuffle = next.shuffle;
+        if (typeof next.repeat === 'number') state.repeat = next.repeat;
+        if (next.title !== undefined) metaTitle.textContent = next.title || 'Orange Music';
+        if (next.artist !== undefined) metaArtist.textContent = next.artist || '桌面歌词';
+        updateControls();
+        if (shouldReplace) {
+          state.lyrics = next.lyrics;
+          lyricsKey = nextKey;
+          console.log('[DL] render lyrics len=', next.lyrics.length, 'title=', next.title, 'playing=', state.playing);
+          renderLyrics();
+        } else {
+          updateActive();
+        }
+      }
+
+      // ---------- 交互 ----------
+      if (desktop) {
+        if (desktop.onDesktopLyricsState) desktop.onDesktopLyricsState(onState);
+        if (desktop.onDesktopLyricsConfig) desktop.onDesktopLyricsConfig(cfg => applyConfig(cfg));
+        if (desktop.getDesktopLyricsConfig) {
+          desktop.getDesktopLyricsConfig().then(cfg => { if (cfg) applyConfig(cfg); });
+        }
+        // 回拉最近一次播放状态，避免「打开窗口瞬间空白、要等下一次 timeupdate 才有歌词」
+        if (desktop.getDesktopLyricsState) {
+          desktop.getDesktopLyricsState().then(st => { if (st) onState(st); });
+        }
+      }
+
+      document.getElementById('closeBtn').addEventListener('click', () => {
+        if (desktop?.hideDesktopLyrics) desktop.hideDesktopLyrics();
+      });
+
+      // 设置按钮：通知主窗口跳到「桌面歌词」设置区块
+      document.getElementById('settingsBtn').addEventListener('click', () => {
+        if (desktop?.openDesktopLyricsSettings) desktop.openDesktopLyricsSettings();
+      });
+
+      pinBtn.addEventListener('click', () => setLocked(!locked));
+
+      // 悬停整个窗口（任意位置）→ 显示发光光圈 + 工具按钮。
+      const playBtn = document.getElementById('playBtn');
+      const shuffleBtn = document.getElementById('shuffleBtn');
+      const repeatBtn = document.getElementById('repeatBtn');
+      const prevBtn = document.getElementById('prevBtn');
+      const nextBtn = document.getElementById('nextBtn');
+
+      function updateControls() {
+        playBtn.classList.toggle('playing', state.playing);
+        shuffleBtn.classList.toggle('active', state.shuffle === true);
+        repeatBtn.classList.toggle('active', state.repeat > 0);
+        repeatBtn.classList.toggle('repeat-one', state.repeat === 1);
+        repeatBtn.title = state.repeat === 0 ? '循环播放（关）' : state.repeat === 1 ? '单曲循环' : '列表循环';
+      }
+
+      function sendControl(action) {
+        if (desktop?.sendDesktopLyricsControl) desktop.sendDesktopLyricsControl(action);
+      }
+      shuffleBtn.addEventListener('click', () => sendControl('shuffle'));
+      prevBtn.addEventListener('click', () => sendControl('prev'));
+      playBtn.addEventListener('click', () => sendControl('play-pause'));
+      nextBtn.addEventListener('click', () => sendControl('next'));
+      repeatBtn.addEventListener('click', () => sendControl('repeat'));
+
+      // ---------- 手动缩放窗口 ----------
+      // 透明无边框窗口没有 OS 原生 resize 边框，resizable:true 在 Windows 上不生效，
+      // 故在窗口四周放 8 个 no-drag 手柄，mousedown 记录起点、mousemove 算新 bounds、
+      // 经 IPC 让主进程 setBounds 实时应用。
+      const MIN_W = 360, MIN_H = 160;
+      let rzEdge = null, rzStartX = 0, rzStartY = 0, rzStartBounds = null;
+
+      function currentBounds() {
+        return {
+          x: window.screenX,
+          y: window.screenY,
+          width: window.outerWidth,
+          height: window.outerHeight
+        };
+      }
+
+      document.querySelectorAll('.rz').forEach(h => {
+        h.addEventListener('mousedown', ev => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          rzEdge = h.dataset.edge;
+          rzStartX = ev.screenX;
+          rzStartY = ev.screenY;
+          rzStartBounds = currentBounds();
+        });
+      });
+
+      window.addEventListener('mousemove', ev => {
+        if (!rzEdge || !rzStartBounds) return;
+        const dx = ev.screenX - rzStartX;
+        const dy = ev.screenY - rzStartY;
+        const b = { ...rzStartBounds };
+        // 左 / 上边缘：位置跟着动、尺寸反向
+        if (rzEdge.includes('w')) { b.x = rzStartBounds.x + dx; b.width = rzStartBounds.width - dx; }
+        else if (rzEdge.includes('e')) { b.width = rzStartBounds.width + dx; }
+        if (rzEdge.includes('n')) { b.y = rzStartBounds.y + dy; b.height = rzStartBounds.height - dy; }
+        else if (rzEdge.includes('s')) { b.height = rzStartBounds.height + dy; }
+        // 最小尺寸钳制（与主进程一致，避免抖动）
+        if (b.width < MIN_W) {
+          if (rzEdge.includes('w')) b.x -= (MIN_W - b.width);
+          b.width = MIN_W;
+        }
+        if (b.height < MIN_H) {
+          if (rzEdge.includes('n')) b.y -= (MIN_H - b.height);
+          b.height = MIN_H;
+        }
+        if (desktop?.resizeDesktopLyrics) desktop.resizeDesktopLyrics(b);
+      });
+
+      window.addEventListener('mouseup', () => { rzEdge = null; rzStartBounds = null; });
+
+      // 悬停整个窗口（任意位置）→ 显示发光光圈 + 工具按钮。
+      // 拖动用 -webkit-app-region: drag 原生实现（会吞掉渲染层的 :hover / mouseenter），
+      // 所以 hover 状态改由主进程检测「光标是否落在窗口 bounds 内」后经 IPC 推送，
+      // 这样既能原生拖动、又能整个窗口悬停显示光圈。
+      function setHovered(on) {
+        hovered = on;
+        wrap.classList.toggle('hovered', on);
+      }
+      if (desktop?.onDesktopLyricsHover) desktop.onDesktopLyricsHover(setHovered);
+
+      // 拖拽交给 -webkit-app-region: drag（.lyrics-wrap 上），此处无需 JS 拖拽；
+      // 滚轮调字号、按钮点击等交互仍正常（按钮区域是 no-drag）。
+
+      // 滚轮临时调字号（仅显示层局部放大，松手即回）
+      let wheelTimer = null;
+      let fontBoost = 0;
+      window.addEventListener('wheel', event => {
+        const base = Number(config.fontSize) || 34;
+        fontBoost = Math.max(-14, Math.min(20, fontBoost + (event.deltaY < 0 ? 2 : -2)));
+        document.documentElement.style.setProperty('--dl-font-size', `${base + fontBoost}px`);
+        clearTimeout(wheelTimer);
+        wheelTimer = setTimeout(() => {
+          document.documentElement.style.setProperty('--dl-font-size', `${base}px`);
+          fontBoost = 0;
+        }, 1200);
+      });
+
+      applyConfig(config);
+    })();
+  </script>
+</body>
+</html>
