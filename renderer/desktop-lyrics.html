@@ -420,6 +420,8 @@
         playing: false,
         time: 0,
         lyrics: [],
+        /** 当前曲目 id：换歌时用它判断要不要丢掉上一首的歌词 */
+        trackId: '',
         title: '',
         artist: '',
         shuffle: false,
@@ -650,8 +652,14 @@
         // IPC 反序列化让数组引用每次不同，必须用内容指纹判断歌词是否真正变化。
         const nextKey = hasLyrics ? lyricsFingerprint(next.lyrics) : '';
         const lyricsChanged = hasLyrics && nextKey !== lyricsKey;
-        // 空歌词只在「确实切到没歌词的歌」时才清空；加载中的瞬时空歌词保留旧歌词。
-        const shouldReplace = lyricsChanged && (next.lyrics.length || !state.lyrics.length);
+        // 换歌要单独判断：原来「空歌词不覆盖」是为了躲开加载中的瞬时空数组，
+        // 但后果是切到一首没有歌词的歌（纯音乐 / 还没加载完）时，窗口里会一直挂着
+        // 上一首的歌词 —— 唱错歌比暂时空白严重得多。
+        const trackKey = typeof next.id === 'string' ? next.id : '';
+        const trackChanged = trackKey !== state.trackId;
+        state.trackId = trackKey;
+        // 换歌 → 一律重建（没歌词就显示「暂无歌词」）；同一首歌内 → 只有拿到非空歌词才重建
+        const shouldReplace = lyricsChanged && (next.lyrics.length > 0 || trackChanged);
 
         state.playing = next.playing === true;
         if (typeof next.time === 'number' && Number.isFinite(next.time) && next.time >= 0) {

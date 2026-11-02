@@ -78,6 +78,8 @@ const defaultPrefs = {
   waveform: false,
   lyricsSize: 30,
   lyricBackdrop: true,
+  // 页面底层的彩色光晕（radial 渐变）。关掉后 body 只剩纯色/极浅线性渐变。
+  bgGlow: true,
   shortcuts: true,
   restoreLastTrack: true,
   autoplayImport: false,
@@ -231,13 +233,23 @@ const state = {
   progress: readStoredObject('orange-progress'),
   prefs: { ...defaultPrefs, ...readStoredObject('orange-prefs') },
   recommendationOffset: 0,
-  importedIds: [],
   pendingAddId: null,
   pendingAddIds: [],
   selectMode: false,
   selection: new Set(),
   lyricImportId: null,
-  searchScope: 'all'
+  searchScope: 'all',
+  // ---------- 在线音乐 ----------
+  /** 当前选中的在线音源：netease / qq / kugou */
+  onlineSource: 'netease',
+  /** 各音源登录状态（由主进程返回） */
+  onlineAccounts: [],
+  /** 在线搜索结果（正常化后的曲目对象） */
+  onlineResults: [],
+  /** 已经解析/播放过的在线曲目，和本地资料库分开存，避免污染「歌曲」页 */
+  online: [],
+  onlineKeyword: '',
+  onlineLoading: false
 };
 
 let demoUrl = null;
@@ -503,7 +515,8 @@ function escapeHtml(value) {
 }
 
 function getTrack(id) {
-  return state.songs.find(song => song.id === id);
+  // 在线曲目不进本地资料库，单独放在 state.online 里；播放器所有按 id 取曲目的地方都要能看到它
+  return state.songs.find(song => song.id === id) || state.online.find(song => song.id === id);
 }
 
 function lossless(format) {
@@ -560,14 +573,28 @@ function qualityLabel(track) {
 function setQualityBadge(track, fallbackText) {
   const badge = $('#fullContext');
   if (!badge) return;
-  const text = fallbackText || qualityLabel(track);
+  const online = Boolean(track?._online);
+  // 在线曲目交给 online.js 组织文案（容器 + 码率 / 无损 / 试听），并且可点击切音质；
+  // 本地曲目保持原样，只是一个静态标签。
+  const onlineText = online && typeof onlineQualityText === 'function' ? onlineQualityText(track) : '';
+  const text = fallbackText || onlineText || qualityLabel(track);
+  // 选了会员档位但只拿到低档：给徽标加个琥珀色，配合「超清母带 → MP3 320K」的写法
+  const fallbackQuality = online && typeof qualityDelivery === 'function'
+    ? (() => { const info = qualityDelivery(track); return Boolean(info.wanted && !info.delivered); })()
+    : false;
   // 只改文字，不要把 badge 的 innerHTML 整个替换掉：
   // 里面那个 <b id="fullFormat"> 被替换掉之后，updatePlayerUi 再也找不到它，
   // 后续所有「格式」更新都会静默失效（这正是旧版播放后格式标签消失的原因）。
   const label = $('#fullFormat');
   if (label) label.textContent = text;
   else badge.textContent = text;
-  badge.title = text;
+  badge.classList.toggle('is-clickable', online);
+  badge.classList.toggle('is-fallback', fallbackQuality);
+  badge.tabIndex = online ? 0 : -1;
+  badge.setAttribute('role', online ? 'button' : 'presentation');
+  badge.title = online
+    ? (fallbackQuality ? `${text} · 该档位未拿到，点击换一档` : `${text} · 点击切换音质`)
+    : text;
 }
 
 // 原始歌词（未做任何过滤）
@@ -610,10 +637,11 @@ function trackRowHtml(track, index) {
   const isCurrent = state.currentId === track.id;
   const selected = state.selection.has(track.id);
   return `
-    <div class="track-row ${isCurrent ? 'playing' : ''} ${selected ? 'selected' : ''}" data-track="${track.id}">
+    <div class="track-row ${isCurrent ? 'playing' : ''} ${isCurrent && state.playing ? 'is-playing' : ''} ${selected ? 'selected' : ''}" data-track="${track.id}">
       ${state.selectMode ? `<label class="row-check" title="选择"><input type="checkbox" data-select="${track.id}" ${selected ? 'checked' : ''} /></label>` : ''}
       <div class="track-index">
         <span>${String(index + 1).padStart(2,'0')}</span>
+        <span class="eq-bars" aria-hidden="true"><i></i><i></i><i></i></span>
         <button class="icon-button row-play" data-play="${track.id}" aria-label="播放 ${escapeHtml(track.title)}">
           <svg class="icon filled"><use href="#${isCurrent && state.playing ? 'i-pause' : 'i-play'}"/></svg>
         </button>
@@ -676,9 +704,40 @@ function cardHtml(track) {
     </article>`;
 }
 
+/**
+ * 首页从「在线每日推荐」退回「本地推荐」时要收拾干净：
+ * 区块标题、右上按钮文案、主卡片的次按钮都是在线模块改过的，
+ * 不还原的话会出现「标题写着今日推荐、内容却是本地歌」这种错位。
+ */
+function restoreHomeLocalChrome() {
+  const title = $('#recommendTitle');
+  if (title && title.textContent !== '推荐播放') title.textContent = '推荐播放';
+  const note = $('#recommendNote');
+  if (note && note.textContent) note.textContent = '';
+  const refresh = $('#recommendRefresh');
+  // 用值比较而不是「有没有设过」：否则在线→本地→在线反复切换后，
+  // 按钮会永远停在「刷新」上，再也变不回「换一批」
+  if (refresh && refresh.dataset.localMode !== '1') {
+    refresh.dataset.localMode = '1';
+    refresh.innerHTML = '换一批 <svg class="icon"><use href="#i-chevron-right"/></svg>';
+  }
+  const sub = $('#featureImport');
+  if (sub && sub.dataset.onlineMode !== '0') {
+    sub.dataset.onlineMode = '0';
+    sub.innerHTML = '<svg class="icon"><use href="#i-folder"/></svg>导入歌曲';
+  }
+  // 「全部 N 首」只对每日推荐有意义，本地模式没有这个页面
+  const all = $('#recommendAll');
+  if (all) all.hidden = true;
+}
+
 function renderRecommendations() {
   const target = $('#recommendRow');
   if (!target) return;
+  // 在线模块（online.js）后加载：一旦它拿到了每日推荐，首页这块就交给它渲染，
+  // 这里的本地推荐只作为「没网 / 没登录 / 还没拉到数据」时的兜底。
+  if (typeof renderHomeCardsOnline === 'function' && renderHomeCardsOnline()) return;
+  restoreHomeLocalChrome();
   if (!state.songs.length) {
     target.innerHTML = emptyHtml('资料库还是空的', '导入本地音乐后这里会出现推荐卡片');
     return;
@@ -694,6 +753,9 @@ function renderRecommendations() {
 function renderFeature() {
   const card = $('#featureCard');
   if (!card) return;
+  // 首页主卡片优先展示账号每日推荐，拿不到才回落到本地曲库
+  if (typeof renderHomeHeroOnline === 'function' && renderHomeHeroOnline()) return;
+  restoreHomeLocalChrome();
   const songs = state.songs;
   const cover = $('#featureCover');
   const stamp = $('#featureStamp');
@@ -753,53 +815,343 @@ function renderFavorites() {
   const target = $('#favoriteTrackList');
   if (!target) return;
   const songs = state.songs.filter(song => state.favorites.has(song.id));
-  target.innerHTML = songs.length
-    ? songs.map(trackRowHtml).join('')
-    : emptyHtml('还没有喜爱的歌曲', '点击歌曲旁的心形按钮收藏');
+  // 在线收藏由 online.js 维护（localStorage 里的 orange-online-lib），
+  // 这里拼在本地点赞后面，收藏页就能同时看到本地与在线的红心歌曲
+  const onlineHtml = typeof renderOnlineFavorites === 'function' ? renderOnlineFavorites() : '';
+  // 登录账号在平台上的红心（网易云「我喜欢的音乐」等）也并进来，
+  // 数据没拉过就先渲染占位，拉完由 ensureFavoritesPlatform 再重绘一次
+  const platformHtml = typeof renderPlatformFavorites === 'function' ? renderPlatformFavorites() : '';
+  target.innerHTML = (songs.length || onlineHtml || platformHtml)
+    ? songs.map(trackRowHtml).join('') + onlineHtml + platformHtml
+    : emptyHtml('还没有喜爱的歌曲', '点击歌曲旁的心形按钮收藏，或登录在线音乐账号同步红心');
+  if (typeof ensureFavoritesPlatform === 'function') ensureFavoritesPlatform();
 }
 
-function playlistCoverHtml(playlist) {
-  // 自定义封面优先：编辑弹窗里换的封面之前只存不显示，等于白选
-  if (playlist.cover && playlist.cover !== DEFAULT_COVER) {
-    return `<div class="playlist-cover single"><img src="${escapeHtml(playlist.cover)}" alt="" /></div>`;
+/**
+ * 没有封面的歌单，按名字算一个稳定色相当底色。
+ * 四张卡片全是同一种浅灰蓝会很闷，而随机会让同一个歌单每次刷新都变色，
+ * 所以用名字的字符和取模：同名永远同色，不同歌单基本不撞色。
+ */
+function playlistHue(playlist) {
+  const text = String(playlist?.name || '歌单');
+  let sum = 0;
+  for (const char of text) sum += char.codePointAt(0);
+  // 乘上黄金角再取模：直接取模的话，名字相近的歌单色相会挤在一起（一片紫粉）
+  return (sum * 137) % 360;
+}
+
+function playlistCoverHtml(playlist, overlay = '') {
+  // 1) 自定义封面优先（编辑弹窗里选的图）
+  // 2) 否则用「最后加进来的那首歌」的封面 —— tracks 是 push 到末尾的，所以取最后一个
+  // 3) 再不行才退回占位图标
+  // 注意：没内嵌封面的歌，cover 字段就是默认占位图，不能当封面用，
+  // 否则整张卡都是那张橙色的 App 图标
+  const tracks = playlist.tracks.map(getTrack).filter(Boolean);
+  const custom = playlist.cover && playlist.cover !== DEFAULT_COVER ? playlist.cover : '';
+  const latest = tracks[tracks.length - 1] || tracks[0];
+  const latestCover = latest?.cover && latest.cover !== DEFAULT_COVER ? latest.cover : '';
+  const cover = custom || latestCover;
+  if (!cover) {
+    return `<div class="playlist-cover single"><div class="playlist-symbol" style="--pl-hue:${playlistHue(playlist)}"><svg class="icon"><use href="#i-list"/></svg></div>${overlay}</div>`;
   }
-  const songs = playlist.tracks.map(getTrack).filter(Boolean).slice(0,4);
-  if (!songs.length) {
-    return `<div class="playlist-cover single"><div class="playlist-symbol"><svg class="icon"><use href="#i-list"/></svg></div></div>`;
-  }
-  if (songs.length === 1) return `<div class="playlist-cover single"><img src="${escapeHtml(songs[0].cover)}" alt="" /></div>`;
-  return `<div class="playlist-cover">${songs.slice(0,4).map(song => `<img src="${escapeHtml(song.cover)}" alt="" />`).join('')}</div>`;
+  return `<div class="playlist-cover single"><img src="${escapeHtml(cover)}" alt="" loading="lazy" />${overlay}</div>`;
+}
+
+/* ==========================================================================
+   歌单：卡片 → 详情页
+   以前点卡片直接就开播，想看看里面有什么歌都没办法。现在卡片只负责「打开」，
+   播放交给卡片右下角的播放键；详情页里再按曲目单首播放 / 整单播放。
+   ========================================================================== */
+
+function playlistTracksOf(playlist) {
+  return (playlist?.tracks || []).map(getTrack).filter(Boolean);
+}
+
+function durationText(seconds) {
+  const total = Math.round(Number(seconds) || 0);
+  if (total <= 0) return '';
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.round((total % 3600) / 60);
+  if (hours) return minutes ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
+  if (!minutes) return '不到 1 分钟';
+  return `${minutes} 分钟`;
+}
+
+/** 卡片/详情页共用的副标题：曲目数 · 总时长 · 本地/在线构成 */
+function playlistMetaParts(playlist) {
+  const tracks = playlistTracksOf(playlist);
+  const online = tracks.filter(track => track._online).length;
+  const parts = [`${playlist.tracks.length} 首歌曲`];
+  const dur = durationText(tracks.reduce((sum, track) => sum + (Number(track.duration) || 0), 0));
+  if (dur) parts.push(dur);
+  if (online && online < tracks.length) parts.push(`本地 ${tracks.length - online} · 在线 ${online}`);
+  else if (online) parts.push('全部来自在线');
+  return parts;
+}
+
+function playlistCoverSrc(playlist) {
+  const tracks = playlistTracksOf(playlist);
+  const custom = playlist.cover && playlist.cover !== DEFAULT_COVER ? playlist.cover : '';
+  // 封面规则：自定义优先，否则用最后加进来的那首歌（默认占位图不算封面）
+  const latest = tracks[tracks.length - 1] || tracks[0];
+  const latestCover = latest?.cover && latest.cover !== DEFAULT_COVER ? latest.cover : '';
+  return custom || latestCover;
 }
 
 function renderPlaylists() {
   const grid = $('#playlistGrid');
-  const side = $('#sidebarPlaylists');
-  if (!grid && !side) return;
-  const html = state.playlists.map(playlist => `
-    <article class="playlist-card" data-playlist="${playlist.id}" tabindex="0">
-      ${playlistCoverHtml(playlist)}
-      <button class="playlist-play" data-play-playlist="${playlist.id}" aria-label="播放 ${escapeHtml(playlist.name)}">
-        <svg class="icon"><use href="#i-play"/></svg>
-      </button>
-      <button class="playlist-delete" data-delete-playlist="${playlist.id}" aria-label="删除歌单 ${escapeHtml(playlist.name)}" title="删除歌单">
-        <svg class="icon"><use href="#i-x"/></svg>
-      </button>
-      <button class="playlist-edit" data-edit-playlist="${playlist.id}" aria-label="编辑歌单" title="重命名 / 换封面">
-        <svg class="icon"><use href="#i-audio-lines"/></svg>
-      </button>
-      <button class="playlist-export" data-export-playlist="${playlist.id}" aria-label="导出歌单" title="导出 m3u 歌单">
-        <svg class="icon"><use href="#i-upload"/></svg>
+  if (!grid) return;
+  const html = state.playlists.map(playlist => {
+    const parts = playlistMetaParts(playlist);
+    const meta = parts.length > 1 ? parts.slice(1).join(' · ') : '还没有歌曲';
+    return `
+    <article class="playlist-card" data-playlist="${playlist.id}" tabindex="0" role="button"
+      aria-label="打开歌单 ${escapeHtml(playlist.name)}">
+      ${playlistCoverHtml(playlist, `
+        <button class="playlist-play" data-play-playlist="${playlist.id}" aria-label="播放 ${escapeHtml(playlist.name)}">
+          <svg class="icon"><use href="#i-play"/></svg>
+        </button>`)}
+      <button class="playlist-more" data-pl-menu-toggle="${playlist.id}" aria-haspopup="menu"
+        aria-expanded="false" title="更多操作" aria-label="歌单「${escapeHtml(playlist.name)}」的更多操作">
+        <svg class="icon"><use href="#i-more"/></svg>
       </button>
       <div class="playlist-info">
         <strong>${escapeHtml(playlist.name)}</strong>
-        <span>${playlist.tracks.length} 首歌曲</span>
+        <span>${escapeHtml(`${playlist.tracks.length} 首 · ${meta}`)}</span>
       </div>
-    </article>`).join('');
-  if (grid) grid.innerHTML = html || emptyHtml('还没有歌单', '新建一个歌单来整理音乐');
-  if (side) side.innerHTML = state.playlists.map(playlist => `
-    <button class="sidebar-link" data-play-playlist="${playlist.id}">
-      <svg class="icon"><use href="#i-list"/></svg>${escapeHtml(playlist.name)}<span>${playlist.tracks.length}</span>
-    </button>`).join('');
+    </article>`;
+  }).join('');
+  grid.innerHTML = html || emptyHtml('还没有歌单', '点右上角「新建歌单」建一个，或从任意歌曲的「+」加进来');
+  const countNode = $('#playlistCount');
+  if (countNode) countNode.textContent = state.playlists.length ? `${state.playlists.length} 个` : '';
+  // 详情页开着的时候（比如在详情里移除了一首歌），同步重画
+  if (state.page === 'playlist') renderPlaylistPage();
+}
+
+let currentPlaylistId = null;
+// 从列表点进详情前记一下列表滚到哪了，返回时原样恢复
+let libraryScrollTop = 0;
+
+function currentPlaylist() {
+  return state.playlists.find(item => item.id === currentPlaylistId) || null;
+}
+
+function openPlaylistPage(id) {
+  const playlist = state.playlists.find(item => item.id === id);
+  if (!playlist) {
+    showToast('这个歌单已经不在了');
+    return;
+  }
+  closePlMenu();
+  const scroller = $('.main-content');
+  if (state.page === 'library' && scroller) libraryScrollTop = scroller.scrollTop;
+  currentPlaylistId = id;
+  // showPage 里已经会渲染详情页，这里不再重复调一次
+  showPage('playlist');
+  scroller?.scrollTo({ top: 0 });
+}
+
+function closePlaylistPage() {
+  currentPlaylistId = null;
+  showPage('library');
+  // 列表滚回去，别每次都从头开始找刚才那个歌单
+  const scroller = $('.main-content');
+  if (scroller && libraryScrollTop) {
+    requestAnimationFrame(() => scroller.scrollTo({ top: libraryScrollTop }));
+  }
+}
+
+function plRowHtml(track, index) {
+  const favorite = state.favorites.has(track.id);
+  const current = state.currentId === track.id;
+  const isOnline = Boolean(track._online);
+  const source = isOnline && typeof olSourceMeta === 'function' ? olSourceMeta(track.source).short : '本地文件';
+  const format = isOnline ? '在线' : (track.format || '本地');
+  const badgeClass = isOnline ? 'pl-badge online' : (lossless(track.format) ? 'pl-badge lossless' : 'pl-badge');
+  // 没有内嵌封面的歌，cover 就是默认占位图，整行一片橙色 App 图标；
+  // 这里换成中性的音符方块，列表安静很多
+  const cover = track.cover && track.cover !== DEFAULT_COVER ? track.cover : '';
+  return `
+    <div class="pl-row ${current ? 'playing' : ''} ${current && state.playing ? 'is-playing' : ''}" data-pl-row="${track.id}" tabindex="0">
+      <div class="pl-row-index">
+        <span>${String(index + 1).padStart(2, '0')}</span>
+        <span class="eq-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+        <button class="icon-button" data-pl-play="${track.id}" aria-label="播放 ${escapeHtml(track.title)}">
+          <svg class="icon filled"><use href="#${current && state.playing ? 'i-pause' : 'i-play'}"/></svg>
+        </button>
+      </div>
+      <div class="pl-row-main">
+        ${cover
+          ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />`
+          : `<span class="pl-row-ph"><svg class="icon"><use href="#i-nav-note"/></svg></span>`}
+        <div class="pl-row-text">
+          <div class="pl-row-title"><span>${escapeHtml(track.title)}</span></div>
+          <div class="pl-row-sub">${escapeHtml(track.artist || '未知歌手')} · ${escapeHtml(source)}</div>
+        </div>
+      </div>
+      <div class="pl-row-album">${escapeHtml(track.album || '—')}</div>
+      <div class="pl-row-format"><span class="${badgeClass}">${escapeHtml(format)}</span></div>
+      <div class="pl-row-dur">${formatTime(track.duration)}</div>
+      <div class="pl-row-actions">
+        <button class="icon-button favorite ${favorite ? 'active' : ''}" data-favorite="${track.id}"
+          title="${favorite ? '取消喜欢' : '加入我喜欢'}" aria-label="喜欢">
+          <svg class="icon"><use href="#i-heart"/></svg>
+        </button>
+        <button class="icon-button" data-pl-queue="${track.id}" title="加入播放队列" aria-label="加入播放队列">
+          <svg class="icon"><use href="#i-plus"/></svg>
+        </button>
+        <button class="icon-button" data-pl-add="${track.id}" title="加到别的歌单" aria-label="加到别的歌单">
+          <svg class="icon"><use href="#i-list"/></svg>
+        </button>
+        <button class="icon-button danger" data-pl-remove="${track.id}" title="从本歌单移除" aria-label="从本歌单移除">
+          <svg class="icon"><use href="#i-x"/></svg>
+        </button>
+      </div>
+    </div>`;
+}
+
+function renderPlaylistPage() {
+  const hero = $('#plHero');
+  const list = $('#plTrackList');
+  const table = $('#plTable');
+  if (!hero || !list) return;
+  const playlist = currentPlaylist();
+  if (!playlist) {
+    // 歌单在别处被删掉了：退回列表，别留一页空白
+    closePlaylistPage();
+    return;
+  }
+  const tracks = playlistTracksOf(playlist);
+  const cover = playlistCoverSrc(playlist);
+  const meta = playlistMetaParts(playlist);
+  const barTitle = $('#plBarTitle');
+  if (barTitle) barTitle.textContent = playlist.name;
+  // 顶栏面包屑跟着歌单名走（改名后重绘也能同步，不用再调一次 showPage）
+  const titlebarPage = $('#titlebarPage');
+  if (titlebarPage) titlebarPage.textContent = playlist.name;
+
+  hero.innerHTML = `
+    <div class="pl-hero-cover">
+      ${cover
+        ? `<img src="${escapeHtml(cover)}" alt="" />`
+        : `<div class="pl-hero-fallback" style="--pl-hue:${playlistHue(playlist)}"><svg class="icon"><use href="#i-list"/></svg></div>`}
+    </div>
+    <div class="pl-hero-copy">
+      <p class="pl-eyebrow">我的歌单</p>
+      <h1>${escapeHtml(playlist.name)}</h1>
+      <div class="pl-meta">
+        ${meta.map((part, index) => `${index ? '<i></i>' : ''}<span>${escapeHtml(part)}</span>`).join('')}
+      </div>
+      <div class="pl-actions">
+        <button class="button primary" data-pl-action="play-all" ${tracks.length ? '' : 'disabled'}>
+          <svg class="icon filled"><use href="#i-play"/></svg>播放全部
+        </button>
+        <button class="button secondary" data-pl-action="shuffle" ${tracks.length ? '' : 'disabled'}>
+          <svg class="icon"><use href="#i-shuffle"/></svg>随机播放
+        </button>
+        <button class="button secondary icon-only" data-pl-menu-toggle="${playlist.id}"
+          aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">
+          <svg class="icon"><use href="#i-more"/></svg>
+        </button>
+      </div>
+    </div>`;
+
+  if (table) table.hidden = !tracks.length;
+  list.innerHTML = tracks.length ? tracks.map(plRowHtml).join('') : '';
+  // 空状态放在表格外面：表格一旦 hidden，塞在里面的提示也跟着消失
+  const emptyHost = $('#plEmptyHost');
+  if (emptyHost) {
+    emptyHost.innerHTML = tracks.length
+      ? ''
+      : `<div class="empty-state pl-empty"><strong>这个歌单还是空的</strong><span>去「歌曲」或「在线」里点歌曲旁的「+」，把它加进来</span>
+        <div class="empty-actions">
+          <button class="button secondary small" data-pl-action="go-songs">去我的歌曲</button>
+          <button class="button secondary small" data-pl-action="go-online">去在线音乐</button>
+        </div></div>`;
+  }
+}
+
+/** 从歌单里按顺序播放；给了 startId 就从那首开始（队列仍是整张歌单） */
+function playPlaylistFrom(id, startId = '', shuffled = false) {
+  const playlist = state.playlists.find(item => item.id === id);
+  if (!playlist) return;
+  const tracks = playlistTracksOf(playlist);
+  if (!tracks.length) {
+    showToast('这个歌单还是空的');
+    return;
+  }
+  const ordered = shuffled ? [...tracks].sort(() => Math.random() - .5) : tracks;
+  state.queue = ordered.map(track => track.id);
+  renderQueue();
+  saveLibrary();
+  const start = startId && state.queue.includes(startId) ? startId : state.queue[0];
+  playTrack(start);
+  showToast(shuffled ? `随机播放「${playlist.name}」` : `正在播放歌单「${playlist.name}」`);
+}
+
+/* ---------------------------- 歌单「更多」菜单 ---------------------------- */
+
+function closePlMenu() {
+  const menu = $('#plMenu');
+  if (!menu || menu.hidden) return;
+  menu.hidden = true;
+  menu.innerHTML = '';
+  $$('[data-pl-menu-toggle][aria-expanded="true"]').forEach(button => button.setAttribute('aria-expanded', 'false'));
+}
+
+function openPlMenu(anchor, playlistId) {
+  const menu = $('#plMenu');
+  const playlist = state.playlists.find(item => item.id === playlistId);
+  if (!menu || !playlist) return;
+  const wasOpen = !menu.hidden && menu.dataset.playlist === playlistId;
+  closePlMenu();
+  if (wasOpen) return;
+  // 已经在详情页里了就不必再给一个「打开歌单」
+  const onThisPage = state.page === 'playlist' && currentPlaylistId === playlistId;
+  menu.innerHTML = `
+    ${onThisPage ? '' : `<button type="button" role="menuitem" data-pl-menu="open"><svg class="icon"><use href="#i-list"/></svg>打开歌单</button>`}
+    <button type="button" role="menuitem" data-pl-menu="edit"><svg class="icon"><use href="#i-audio-lines"/></svg>重命名 / 换封面</button>
+    <button type="button" role="menuitem" data-pl-menu="export"><svg class="icon"><use href="#i-upload"/></svg>导出 m3u 歌单</button>
+    <div class="pl-menu-sep"></div>
+    <button type="button" role="menuitem" class="danger" data-pl-menu="delete"><svg class="icon"><use href="#i-trash"/></svg>删除歌单</button>`;
+  menu.dataset.playlist = playlistId;
+  menu.hidden = false;
+  anchor?.setAttribute('aria-expanded', 'true');
+  // 贴着按钮弹，超出窗口就往里收 / 翻到上方
+  const rect = anchor.getBoundingClientRect();
+  const box = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(rect.right - box.width, window.innerWidth - box.width - 8));
+  let top = rect.bottom + 6;
+  if (top + box.height > window.innerHeight - 8) top = Math.max(8, rect.top - box.height - 6);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.querySelector('button')?.focus({ preventScroll: true });
+}
+
+function runPlMenuAction(action, playlistId) {
+  const playlist = state.playlists.find(item => item.id === playlistId);
+  closePlMenu();
+  if (!playlist) return;
+  if (action === 'open') openPlaylistPage(playlist.id);
+  if (action === 'edit') openPlaylistEdit(playlist.id);
+  if (action === 'export') exportPlaylist(playlist.id);
+  if (action === 'delete') deletePlaylist(playlist.id);
+}
+
+function deletePlaylist(id) {
+  const playlist = state.playlists.find(item => item.id === id);
+  if (!playlist) return;
+  if (!window.confirm(`确定要删除歌单“${playlist.name}”吗？\n歌单里的歌曲文件不会被删除。`)) return;
+  state.playlists = state.playlists.filter(item => item.id !== id);
+  saveState();
+  if (currentPlaylistId === id) {
+    currentPlaylistId = null;
+    if (state.page === 'playlist') showPage('library');
+  }
+  renderPlaylists();
+  renderCounts();
+  if (typeof syncPlaylistViews === 'function' && state.page === 'online') syncPlaylistViews();
+  showToast(`已删除歌单「${playlist.name}」`);
 }
 
 function renderAlbums() {
@@ -845,15 +1197,13 @@ function renderCounts() {
   if (sideSongs) sideSongs.textContent = state.songs.length;
   if (sideFavs) sideFavs.textContent = favCount;
   if (profileSongs) profileSongs.textContent = state.songs.length;
-}
-
-function renderImported() {
-  const songs = state.importedIds.map(getTrack).filter(Boolean);
-  const target = $('#importedTrackList');
-  if (!target) return;
-  target.innerHTML = songs.length
-    ? songs.map(trackRowHtml).join('')
-    : emptyHtml('还没有导入歌曲', '从上方选择歌曲或音乐文件夹开始扫描');
+  // 侧栏底部那一行统计：给下面那块留白一点内容，别是一片空玻璃
+  const stat = $('#sidebarStat');
+  if (stat) {
+    stat.innerHTML = state.songs.length
+      ? `<b>${state.songs.length}</b> 首歌曲<i>·</i><b>${favCount}</b> 首喜爱`
+      : '资料库还是空的';
+  }
 }
 
 function renderSearchResults() {
@@ -861,6 +1211,11 @@ function renderSearchResults() {
   const heading = $('#searchHeading');
   if (!target || !heading) return;
   const query = state.query.trim().toLowerCase();
+  // 「查看全部」是给最近播放用的；一进搜索结果就没有意义了
+  const viewAll = $('.search-recent-section .view-all');
+  if (viewAll) viewAll.hidden = Boolean(query);
+  // 同一个关键词也要交给在线模块：本地结果即时出，在线结果防抖后追加在下面
+  if (typeof renderGlobalSearch === 'function') renderGlobalSearch(state.query);
   if (!query) {
     const recent = state.recent.map(getTrack).filter(Boolean).slice(0, 8);
     heading.textContent = '最近播放的歌曲';
@@ -879,7 +1234,17 @@ function renderSearchResults() {
   });
   heading.textContent = `搜索结果 · ${matches.length} 首`;
   if (!matches.length) {
-    target.innerHTML = emptyHtml('没有找到歌曲', '换个关键词或切换筛选试试');
+    // 本地没命中时不再占一大块空态：在线结果紧跟在下面，压成一行提示更好衔接。
+    // 如果只是被「歌名/歌手/专辑」范围筛掉了，顺手告诉用户在「全部」里还有几首。
+    const scopeWord = { title: '歌名', artist: '歌手', album: '专辑' }[scope] || '';
+    let broaden = '';
+    if (scope !== 'all') {
+      const wider = state.songs.filter(song => [song.title, song.artist, song.album, song.format]
+        .some(value => String(value ?? '').toLowerCase().includes(query))).length;
+      if (wider) broaden = ` <button class="search-empty-switch" type="button">「全部」里还有 ${wider} 首</button>`;
+    }
+    const where = scopeWord ? `本地曲库里没有${scopeWord}匹配「${escapeHtml(state.query.trim())}」的歌` : `本地曲库里没有匹配「${escapeHtml(state.query.trim())}」的歌曲`;
+    target.innerHTML = `<div class="search-empty-inline">${where}${broaden}</div>`;
     return;
   }
   if (scope === 'artist' || scope === 'album') {
@@ -1013,12 +1378,34 @@ function refreshTrackRows() {
   $$('.track-row').forEach(row => {
     const id = row.dataset.track;
     row.classList.toggle('playing', Boolean(id) && id === state.currentId);
+    row.classList.toggle('is-playing', Boolean(id) && id === state.currentId && state.playing);
     const use = row.querySelector('.row-play use');
     if (use) use.setAttribute('href', id === state.currentId && state.playing ? '#i-pause' : '#i-play');
   });
   $$('.queue-row').forEach(row => {
     row.classList.toggle('active', row.dataset.queueTrack === state.currentId);
   });
+  // 歌单详情的曲目行与资料库行是两套结构，单独同步一次
+  $$('.pl-row').forEach(row => {
+    const id = row.dataset.plRow;
+    row.classList.toggle('playing', Boolean(id) && id === state.currentId);
+    row.classList.toggle('is-playing', Boolean(id) && id === state.currentId && state.playing);
+    const use = row.querySelector('.pl-row-index use');
+    if (use) use.setAttribute('href', id === state.currentId && state.playing ? '#i-pause' : '#i-play');
+  });
+}
+
+/**
+ * 全屏页封面用高分辨率版本。
+ * 列表里为了省流量存的是 600px（网易云）/ 500px（QQ），但歌词页封面最大能到 520px，
+ * 再叠加高分屏就是 1:1 甚至被放大，150~300px 的老封面会糊成一片。
+ * 这里就地改写 URL 参数，取平台能给到的最大尺寸；本地封面（data: / file:）原样返回。
+ */
+function hiResCover(url) {
+  if (!url || /^(data|blob|file):/i.test(url)) return url;
+  return url
+    .replace(/([?&]param=)\d+y\d+/i, (_, prefix) => `${prefix}1024y1024`)
+    .replace(/T002R\d+x\d+M000/, 'T002R800x800M000');
 }
 
 function updatePlayerUi() {
@@ -1051,7 +1438,7 @@ function updatePlayerUi() {
   $('#miniCover').src = track.cover;
   $('#miniTitle').textContent = track.title;
   $('#miniArtist').textContent = track.artist;
-  $('#fullCover').src = track.cover;
+  $('#fullCover').src = hiResCover(track.cover);
   // 取封面主色写进 --cover-accent，供歌词倾斜的辉光上色
   applyCoverAccent(track.cover);
   applyLyricTheme();
@@ -1189,6 +1576,7 @@ function createDemoWav(track) {
 // 取得可播放的音源：优先已解析好的 _src；否则按 _path 现场解析成 file://；
 // 两者都没有才退回内置测试音（仅老资料库 / 示例数据会遇到）
 async function resolveTrackSource(track) {
+  if (track._online) return resolveOnlineSource(track);
   if (track._src) return track._src;
   if (track._path && window.orangeDesktop?.toFileUrl) {
     const url = await window.orangeDesktop.toFileUrl(track._path).catch(() => null);
@@ -1208,7 +1596,22 @@ async function playTrack(id, forcePlay = true) {
   // 装载，否则 play() 会因没有音源直接失败（表现为“刚打开软件点播放没反应”）。
   const changed = state.currentId !== id || !audio.src;
   const token = ++playRequestToken;
-  const source = changed ? await resolveTrackSource(track) : '';
+  let source = '';
+  if (changed) {
+    // 在线曲目要现取直链，网络失败 / 没有版权都在这里抛出，必须拦住并提示，
+    // 否则异常会直接冒到调用栈外层，界面看起来就是「点了没反应」
+    try {
+      source = await resolveTrackSource(track);
+    } catch (error) {
+      if (token !== playRequestToken) return;
+      state.playing = false;
+      updatePlayIcons();
+      updateLyricsActive();
+      showToast(error?.message || '在线播放失败');
+      console.warn(error);
+      return;
+    }
+  }
   // 解析音源要走一次 IPC。用户连点两首歌时，先发出的请求可能后返回；
   // 如果不校验 token，它会把后点的那首覆盖掉（表现为「点了 A 却在放 B」）。
   if (token !== playRequestToken || !getTrack(id)) return;
@@ -1224,12 +1627,18 @@ async function playTrack(id, forcePlay = true) {
     const canResume = state.prefs.resume && !bootResumeUsed && id === bootResumeId;
     pendingResume = canResume ? Number(state.progress[id] || 0) : 0;
     bootResumeUsed = true;
+    // 在线音频来自 CDN：声明 crossOrigin 才能让 WebAudio 正常出声（否则均衡器 / 频谱会静音）。
+    // 本地文件走 file://，设置 crossOrigin 反而会被 CORS 挡住，必须去掉。
+    if (/^https?:/i.test(source)) audio.crossOrigin = 'anonymous';
+    else audio.removeAttribute('crossorigin');
     audio.src = source;
     audio.load();
     applyReplayGain(track);
     applyPlaybackRate();
     try { localStorage.setItem('orange-last-track', JSON.stringify(id)); } catch {}
     state.recent = [id, ...state.recent.filter(item => item !== id)].slice(0,12);
+    // 在线曲目另存一份到在线库，否则重启后「最近播放」里查不到这首歌
+    if (track._online && typeof recordOnlineRecent === 'function') recordOnlineRecent(id);
     saveState();
     renderRecent();
     updatePlayerUi();
@@ -1245,6 +1654,11 @@ async function playTrack(id, forcePlay = true) {
       }
     });
   }
+  // 在线曲目：直链解析顺带带回来的歌词可能为空（走了缓存、或接口偶发返回空），
+  // 独立补一次，别让「歌能放但没有歌词」变成常态
+  if (!getLyrics(track).length && track._online && typeof ensureOnlineLyrics === 'function') {
+    ensureOnlineLyrics(track);
+  }
   ensureAudioGraph();
   if (audioContext?.state === 'suspended') await audioContext.resume();
   if (token !== playRequestToken) return;
@@ -1259,6 +1673,23 @@ async function playTrack(id, forcePlay = true) {
       else applyVolume();
     } catch (error) {
       if (token !== playRequestToken) return;
+      // 在线音源有时 CDN 不给 CORS 头：去掉 crossOrigin 再试一次，
+      // 代价是均衡器与频谱失效，但至少能正常出声
+      if (track._online && audio.crossOrigin && source) {
+        audio.removeAttribute('crossorigin');
+        audio.src = source;
+        audio.load();
+        try {
+          await audio.play();
+          if (token !== playRequestToken) return;
+          state.playing = true;
+          updatePlayerUi();
+          showToast('已切换为直连播放（音效不可用）');
+          return;
+        } catch (retryError) {
+          console.warn(retryError);
+        }
+      }
       const recovered = await recoverUnsupportedTrack(track).catch(() => false);
       if (token !== playRequestToken) return;
       if (recovered) {
@@ -1402,20 +1833,22 @@ function toggleFavorite(id = state.currentId) {
   renderLocalTracks();
   renderFavorites();
   updateFavoriteUi();
+  // 歌单详情里的红心跟着变，不必整页重绘
+  $$('.pl-row [data-favorite]').forEach(button => {
+    button.classList.toggle('active', state.favorites.has(button.dataset.favorite));
+  });
 }
 
 // 从资料库移除歌曲（只删除记录，不动磁盘上的音乐文件）
 /**
  * 把一首歌从资料库的各个引用点摘干净（不负责 UI 刷新与当前播放状态）。
- * removeTrack 与 cleanDuplicates 共用这一份规则 —— 原先两处各写一遍，
- * cleanDuplicates 那份漏掉了 state.importedIds，被清理的 id 会一直留在「本次导入」列表里。
+ * removeTrack 与 cleanDuplicates 共用这一份规则，避免两处各写一遍、逻辑漂移。
  */
 function detachTrack(id) {
   state.songs = state.songs.filter(song => song.id !== id);
   state.queue = state.queue.filter(item => item !== id);
   state.favorites.delete(id);
   state.recent = state.recent.filter(item => item !== id);
-  state.importedIds = state.importedIds.filter(item => item !== id);
   state.selection.delete(id);
   delete state.progress[id];
   state.playlists.forEach(playlist => {
@@ -1464,7 +1897,6 @@ function clearLibrary() {
   state.queue = [];
   state.favorites.clear();
   state.recent = [];
-  state.importedIds = [];
   state.progress = {};
   state.currentId = null;
   state.selection.clear();
@@ -1646,7 +2078,12 @@ function syncVolumeUi() {
 function paintRange(slider, ratio) {
   if (!slider) return;
   const safe = Number.isFinite(ratio) ? ratio : 0;
-  slider.style.setProperty('--range-pct', `${Math.max(0, Math.min(100, safe * 100)).toFixed(2)}%`);
+  const clamped = Math.max(0, Math.min(1, safe));
+  slider.style.setProperty('--range-pct', `${(clamped * 100).toFixed(2)}%`);
+  // 播放页那条「轨道 + 填充」是分离的两层，填充宽度要 0~1 的数字。
+  // 变量只往下继承，写在内层 input 上外层的 .br-fill 读不到，所以写在容器上。
+  const bar = slider.closest('.bar-range');
+  if (bar) bar.style.setProperty('--range-p', clamped.toFixed(4));
 }
 
 function seekBy(delta) {
@@ -1896,7 +2333,6 @@ async function importFilesInner(fileList) {
     state.queue.push(id);
     added += 1;
     if (!firstAddedId) firstAddedId = id;
-    state.importedIds.push(id);
     if (sourcePath) knownPaths.add(sourcePath.toLowerCase());
     reportProgress();
   }
@@ -1916,8 +2352,7 @@ async function importFilesInner(fileList) {
     : (added ? `已识别 ${added} 首本地歌曲` : '没有新的歌曲需要添加'));
   // 导入结束后顺手回收不再被引用的封面，避免封面目录随着反复导入慢慢变大
   pruneOrphanCovers();
-  // 导入后自动播放「本次新增的第一首」，而不是 state.importedIds[0]
-  // （那是本次运行里第一次导入的第一首；第二次导入会点开一首老歌）
+  // 导入后自动播放「本次新增的第一首」（用 firstAddedId 精确捕获，避免误放老歌）
   if (state.prefs.autoplayImport && firstAddedId) {
     playTrack(firstAddedId);
   }
@@ -2250,11 +2685,43 @@ function updateKaraoke(lyrics, active, position) {
   }
 }
 
+const PAGE_LABELS = {
+  home: '主页',
+  search: '搜索',
+  online: '在线',
+  library: '歌单',
+  playlist: '歌单详情',
+  songs: '歌曲',
+  favorites: '喜爱',
+  recent: '最近添加',
+  settings: '设置',
+  import: '导入'
+};
+
+// 详情页不是独立的一级入口：歌单详情要算在「歌单」这个导航项下面
+const PAGE_NAV_ALIAS = { playlist: 'library' };
+
 function showPage(page) {
   const changed = state.page !== page;
   state.page = page;
+  // 页面切换的观察者（设置页导航高亮等）需要知道「现在在哪一页」
+  window.dispatchEvent(new CustomEvent('pagechange', { detail: page }));
   $$('.page').forEach(section => section.classList.toggle('active', section.id === `${page}Page`));
-  $$( '.nav-item, .sidebar-link[data-page]' ).forEach(button => button.classList.toggle('active', button.dataset.page === page));
+  const navKey = PAGE_NAV_ALIAS[page] || page;
+  $$( '.nav-item, .sidebar-link[data-page]' ).forEach(button => button.classList.toggle('active', button.dataset.page === navKey));
+  // 侧栏底部那颗「设置」不是 .nav-item，单独给激活态，否则进了设置页左边一点反馈都没有
+  const settingsEntry = $('.sidebar .storage-card');
+  if (settingsEntry) settingsEntry.classList.toggle('active', page === 'settings');
+  const titlebarPage = $('#titlebarPage');
+  if (titlebarPage) titlebarPage.textContent = PAGE_LABELS[page] || '';
+  if (page === 'online' && typeof refreshOnlinePage === 'function') refreshOnlinePage();
+  // 首页的在线每日推荐按天 / 按平台失效，回到首页时问一下要不要重拉
+  if (page === 'home' && typeof ensureHomeDaily === 'function') ensureHomeDaily();
+  // 喜爱页混着本地收藏、在线收藏和账号红心，进页时重渲染一次才能拿到最新状态
+  if (page === 'favorites') renderFavorites();
+  // 页面 key 是 library（不是 playlists），以前这里恒不成立，切回歌单页时列表不会刷新
+  if (page === 'library') { renderPlaylists(); if (typeof renderAlbums === 'function') renderAlbums(); }
+  if (page === 'playlist') renderPlaylistPage();
   if (!changed) return;
   // 搜索词只属于搜索页。离开搜索页时不清掉的话，「歌曲」列表会继续被这个看不见的词过滤，
   // 用户会以为资料库里的歌丢了。真正的搜索结果是独立渲染的，不受影响。
@@ -2264,6 +2731,8 @@ function showPage(page) {
     if (input) input.value = '';
     renderLocalTracks();
   }
+  // 整窗不滚动了（滚动收在 .main-content 里），切页要把内容区拉回顶部
+  $('.main-content')?.scrollTo({ top: 0 });
   window.scrollTo({ top:0, behavior:'smooth' });
 }
 
@@ -2325,6 +2794,11 @@ function openFullPlayer() {
       }
     });
   }
+  // 在线曲目打开全屏页时也补一次歌词：这里常常是「还没播放就点开了歌词页」，
+  // 直链解析还没跑，不补就一直是空的
+  if (track && track._online && !getLyrics(track).length && typeof ensureOnlineLyrics === 'function') {
+    ensureOnlineLyrics(track);
+  }
 }
 
 function closeFullPlayer() {
@@ -2369,6 +2843,12 @@ function addToPlaylist(playlistId, trackId = state.pendingAddId) {
       playlist.tracks.push(id);
       added += 1;
     }
+    // 网络歌曲要顺手把元数据落到在线库，否则重启后按 id 查不到这首歌
+    const track = getTrack(id);
+    if (track && track._online && typeof persistableTrack === 'function' && typeof onlineLib !== 'undefined') {
+      onlineLib.tracks[id] = onlineLib.tracks[id] || persistableTrack(track);
+      if (typeof saveOnlineLib === 'function') saveOnlineLib();
+    }
   });
   saveState();
   saveLibrary();
@@ -2380,16 +2860,7 @@ function addToPlaylist(playlistId, trackId = state.pendingAddId) {
 }
 
 function playPlaylist(id) {
-  const playlist = state.playlists.find(item => item.id === id);
-  if (!playlist?.tracks.length) {
-    showToast('这个歌单还是空的');
-    return;
-  }
-  state.queue = [...playlist.tracks];
-  renderQueue();
-  saveLibrary();
-  playTrack(playlist.tracks[0]);
-  showToast(`正在播放歌单“${playlist.name}”`);
+  playPlaylistFrom(id);
 }
 
 function applyPlayerStyle() {
@@ -2677,20 +3148,6 @@ document.addEventListener('click', event => {
     return;
   }
 
-  const editPlaylistButton = event.target.closest('[data-edit-playlist]');
-  if (editPlaylistButton) {
-    event.stopPropagation();
-    openPlaylistEdit(editPlaylistButton.dataset.editPlaylist);
-    return;
-  }
-
-  const exportPlaylistButton = event.target.closest('[data-export-playlist]');
-  if (exportPlaylistButton) {
-    event.stopPropagation();
-    exportPlaylist(exportPlaylistButton.dataset.exportPlaylist);
-    return;
-  }
-
   const removeFolderButton = event.target.closest('[data-remove-folder]');
   if (removeFolderButton) {
     event.stopPropagation();
@@ -2732,6 +3189,35 @@ document.addEventListener('click', event => {
     return;
   }
 
+  const playlistMenuToggle = event.target.closest('[data-pl-menu-toggle]');
+  if (playlistMenuToggle) {
+    event.stopPropagation();
+    openPlMenu(playlistMenuToggle, playlistMenuToggle.dataset.plMenuToggle);
+    return;
+  }
+
+  const playlistMenuItem = event.target.closest('[data-pl-menu]');
+  if (playlistMenuItem) {
+    const menu = $('#plMenu');
+    runPlMenuAction(playlistMenuItem.dataset.plMenu, menu?.dataset.playlist);
+    return;
+  }
+
+  if (event.target.closest('[data-pl-back]')) {
+    closePlaylistPage();
+    return;
+  }
+
+  const playlistAction = event.target.closest('[data-pl-action]');
+  if (playlistAction) {
+    const action = playlistAction.dataset.plAction;
+    if (action === 'play-all') playPlaylistFrom(currentPlaylistId);
+    if (action === 'shuffle') playPlaylistFrom(currentPlaylistId, '', true);
+    if (action === 'go-songs') showPage('songs');
+    if (action === 'go-online') showPage('online');
+    return;
+  }
+
   const playlistPlay = event.target.closest('[data-play-playlist]');
   if (playlistPlay) {
     event.stopPropagation();
@@ -2739,23 +3225,58 @@ document.addEventListener('click', event => {
     return;
   }
 
-  const playlistDelete = event.target.closest('[data-delete-playlist]');
-  if (playlistDelete) {
+  const rowRemove = event.target.closest('[data-pl-remove]');
+  if (rowRemove) {
     event.stopPropagation();
-    const playlist = state.playlists.find(item => item.id === playlistDelete.dataset.deletePlaylist);
-    if (playlist && window.confirm(`确定要删除歌单“${playlist.name}”吗？歌曲文件不会被删除。`)) {
-      state.playlists = state.playlists.filter(item => item.id !== playlist.id);
+    const playlist = currentPlaylist();
+    if (playlist) {
+      playlist.tracks = playlist.tracks.filter(id => id !== rowRemove.dataset.plRemove);
       saveState();
+      if (typeof saveOnlineLib === 'function') saveOnlineLib();
       renderPlaylists();
       renderCounts();
-      showToast('已删除歌单');
+      showToast('已从歌单移除');
     }
+    return;
+  }
+
+  const rowQueue = event.target.closest('[data-pl-queue]');
+  if (rowQueue) {
+    event.stopPropagation();
+    const track = getTrack(rowQueue.dataset.plQueue);
+    if (track) {
+      state.queue.push(track.id);
+      renderQueue();
+      saveLibrary();
+      showToast('已加入播放队列');
+    }
+    return;
+  }
+
+  const rowAdd = event.target.closest('[data-pl-add]');
+  if (rowAdd) {
+    event.stopPropagation();
+    openAddModal(rowAdd.dataset.plAdd);
+    return;
+  }
+
+  const rowPlayButton = event.target.closest('[data-pl-play]');
+  if (rowPlayButton) {
+    event.stopPropagation();
+    playPlaylistFrom(currentPlaylistId, rowPlayButton.dataset.plPlay);
+    return;
+  }
+
+  const playlistRow = event.target.closest('[data-pl-row]');
+  if (playlistRow) {
+    // 点整行 = 从这首开始按歌单顺序播放
+    playPlaylistFrom(currentPlaylistId, playlistRow.dataset.plRow);
     return;
   }
 
   const playlistCard = event.target.closest('[data-playlist]');
   if (playlistCard) {
-    playPlaylist(playlistCard.dataset.playlist);
+    openPlaylistPage(playlistCard.dataset.playlist);
     return;
   }
 
@@ -2819,7 +3340,18 @@ document.addEventListener('click', event => {
     showPage('library');
     showTab('favorites');
   }
+  if (action === 'home-login') {
+    showPage('online');
+  }
+  if (action === 'home-open-daily') {
+    // 首页只看得到 8 首，这里把人送到在线页的每日推荐，能看到全部
+    showPage('online');
+    if (typeof switchOnlineView === 'function') switchOnlineView('daily');
+  }
   if (action === 'refresh-recommend') {
+    // 首页正在展示在线每日推荐时，「换一批」交给在线模块重新请求；
+    // 它返回 false 说明当前是本地兜底状态，继续走原来的本地轮换
+    if (typeof refreshHomeDaily === 'function' && refreshHomeDaily()) return;
     state.recommendationOffset = (state.recommendationOffset + 4) % Math.max(1,state.songs.length);
     renderRecommendations();
   }
@@ -2879,17 +3411,70 @@ $('#fullFavorite').addEventListener('click', () => toggleFavorite());
   $(selector)?.addEventListener('click', toggleMute);
 });
 
-$('#globalSearch').addEventListener('input', event => {
+const globalSearchInput = $('#globalSearch');
+const searchClearButton = $('#searchClear');
+
+// 输入框右侧的清空按钮：有内容才出现（原生 type=search 的 × 在各平台样式不一，自己画一个）
+function syncSearchClear() {
+  if (!searchClearButton) return;
+  searchClearButton.hidden = !String(globalSearchInput?.value || '').trim();
+}
+
+globalSearchInput?.addEventListener('input', event => {
   state.query = event.target.value;
   renderSearchResults();
+  syncSearchClear();
   showPage('search');
 });
+
+// 清空搜索时把范围也收回「全部」：否则上一条搜索留在「歌手」上，
+// 下一条明明有这首歌却显示「0 首」，用户根本看不出是被范围筛掉了
+function resetSearchScope() {
+  state.searchScope = 'all';
+  $$('#searchScopes .chip').forEach(item => item.classList.toggle('active', item.dataset.scope === 'all'));
+}
+
+globalSearchInput?.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || !globalSearchInput.value) return;
+  event.preventDefault();
+  event.stopPropagation();
+  globalSearchInput.value = '';
+  state.query = '';
+  resetSearchScope();
+  renderSearchResults();
+  syncSearchClear();
+});
+
+searchClearButton?.addEventListener('click', () => {
+  if (!globalSearchInput) return;
+  globalSearchInput.value = '';
+  state.query = '';
+  resetSearchScope();
+  renderSearchResults();
+  syncSearchClear();
+  globalSearchInput.focus();
+});
+
+// 输入框外层改成 div 之后，点胶囊空白处也要能聚焦（原来靠 label 的默认行为）
+$('.search-page-input')?.addEventListener('click', event => {
+  if (event.target.closest('.search-page-clear')) return;
+  globalSearchInput?.focus();
+});
+
+syncSearchClear();
 
 $$('#searchScopes .chip').forEach(chip => chip.addEventListener('click', () => {
   state.searchScope = chip.dataset.scope;
   $$('#searchScopes .chip').forEach(item => item.classList.toggle('active', item === chip));
   renderSearchResults();
 }));
+
+// 「全部里还有 N 首」：一键把范围切回全部（不然用户只能自己发现是范围筛掉了）
+$('#searchRecentRow')?.addEventListener('click', event => {
+  if (!event.target.closest('.search-empty-switch')) return;
+  resetSearchScope();
+  renderSearchResults();
+});
 /* 播放快捷键统一在 handleShortcut 中处理 */
 
 function isTypingTarget(target) {
@@ -2915,10 +3500,18 @@ function handleShortcut(event) {
     }
     if ($('#fullPlayer').classList.contains('open')) closeFullPlayer();
     else if ($('#queueDrawer').classList.contains('open')) toggleQueue(false);
+    // 歌单详情里按 Esc 退回歌单列表（最外层再返回）
+    else if (state.page === 'playlist') closePlaylistPage();
     return true;
   }
-  if (event.code === 'MediaPlayPause' || event.code === 'MediaStop') {
+  // Ctrl+F 也进搜索：默认绑定是 Ctrl+K，但绝大多数软件都用 Ctrl+F，
+  // 两个都认，免得用户按了没反应以为搜索坏了
+  if (ctrl && lower === 'f') {
     event.preventDefault();
+    runShortcutAction('search');
+    return true;
+  }
+  if (event.code === 'MediaPlayPause' || event.code === 'MediaStop') {    event.preventDefault();
     togglePlayback();
     return true;
   }
@@ -2968,6 +3561,46 @@ function runShortcutAction(action) {
 
 document.addEventListener('keydown', handleShortcut);
 
+/* 歌单：回车打开 / 播放，Esc 与点击空白处收起「更多」菜单。
+   （空格留给全局「播放 / 暂停」，不再抢） */
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    if (!$('#plMenu')?.hidden) closePlMenu();
+    return;
+  }
+  if (event.key !== 'Enter' || event.altKey || event.ctrlKey || event.metaKey) return;
+  const card = event.target.closest?.('.playlist-card[data-playlist]');
+  if (card) {
+    event.preventDefault();
+    openPlaylistPage(card.dataset.playlist);
+    return;
+  }
+  const row = event.target.closest?.('.pl-row[data-pl-row]');
+  if (row) {
+    event.preventDefault();
+    playPlaylistFrom(currentPlaylistId, row.dataset.plRow);
+  }
+});
+document.addEventListener('click', event => {
+  if (event.target.closest('#plMenu') || event.target.closest('[data-pl-menu-toggle]')) return;
+  closePlMenu();
+});
+// 内容区滚动时：收起菜单，并让详情页的返回条长出玻璃底（静止时保持透明，
+// 否则背景是渐变的，一条半透明色带压在上面反而像块补丁）
+const mainScroller = $('.main-content');
+mainScroller?.addEventListener('scroll', () => {
+  closePlMenu();
+  mainScroller.classList.toggle('is-scrolled', mainScroller.scrollTop > 6);
+}, { passive: true });
+window.addEventListener('resize', closePlMenu);
+// 卡片上点右键 = 打开「更多」，和很多播放器一致
+document.addEventListener('contextmenu', event => {
+  const card = event.target.closest?.('.playlist-card[data-playlist]');
+  if (!card) return;
+  event.preventDefault();
+  openPlMenu(card.querySelector('.playlist-more') || card, card.dataset.playlist);
+});
+
 $$('#formatFilters .chip').forEach(chip => chip.addEventListener('click', () => {
   state.format = chip.dataset.format;
   $$('#formatFilters .chip').forEach(item => item.classList.toggle('active',item === chip));
@@ -2982,6 +3615,8 @@ $('#playFavorites')?.addEventListener('click', () => {
   playTrack(favorites[0]);
 });
 $('#featurePlay').addEventListener('click', () => {
+  // 首页主卡片展示的是每日推荐时，这里播放整份推荐列表
+  if (typeof playHomeDailyAll === 'function' && playHomeDailyAll()) return;
   if (!state.songs.length) {
     showPage('import');
     return;
@@ -2989,7 +3624,11 @@ $('#featurePlay').addEventListener('click', () => {
   const track = getTrack(state.currentId) || state.songs[0];
   playTrack(track.id);
 });
-$('#featureImport')?.addEventListener('click', () => showPage('import'));
+$('#featureImport')?.addEventListener('click', () => {
+  // 在线模式下这颗按钮是「刷新推荐」，本地模式下才是「导入歌曲」
+  if (typeof refreshHomeDaily === 'function' && refreshHomeDaily()) return;
+  showPage('import');
+});
 
 audio.addEventListener('play', () => { state.playing = true; updatePlayIcons(); updateLyricsActive(); pushDesktopLyricsState(); });
 audio.addEventListener('pause', () => { state.playing = false; updatePlayIcons(); updateLyricsActive(); pushDesktopLyricsState(); });
@@ -3062,8 +3701,8 @@ $('#playlistForm').addEventListener('submit', event => {
   renderCounts();
   $('#playlistName').value = '';
   $('#playlistModal').close();
-  showPage('library');
-  showTab('playlists');
+  // 新建完直接把新歌单打开：刚建好就要往里加歌，停在列表上还得再点一下
+  openPlaylistPage(playlist.id);
   showToast(pending.length
     ? `已创建歌单“${name}”并加入 ${pending.length} 首歌曲`
     : `已创建歌单“${name}”`);
@@ -3546,6 +4185,8 @@ function pushDesktopLyricsState() {
   const track = getTrack(state.currentId);
   const lyrics = track ? getLyrics(track) : [];
   window.orangeDesktop.sendDesktopLyricsState({
+    // 带上曲目 id：歌词窗据此判断「换歌了」，切到无歌词的歌时不会继续显示上一首
+    id: track ? track.id : '',
     playing: state.playing,
     time: audio.currentTime || 0,
     title: track ? track.title : '',
@@ -3651,6 +4292,8 @@ function fileUrlToPath(url) {
 function loadImage(src) {
   return new Promise(resolve => {
     const image = new Image();
+    // 在线封面同样是跨域资源：不声明 crossOrigin 会把 canvas 画脏，getImageData 直接抛错
+    if (/^https?:/i.test(src)) image.crossOrigin = 'anonymous';
     image.onload = () => resolve(image);
     image.onerror = () => resolve(null);
     image.src = src;
@@ -4778,13 +5421,15 @@ async function importM3u() {
     showToast('歌单里的歌曲没有找到');
     return;
   }
-  state.playlists.push({ id: `p${Date.now()}`, name: result.name || '导入的歌单', tracks });
+  const playlist = { id: `p${Date.now()}`, name: result.name || '导入的歌单', tracks };
+  state.playlists.push(playlist);
   saveState();
   saveLibrary();
   renderAll();
   showPage('library');
   showTab('playlists');
   showToast(`已导入歌单，共 ${tracks.length} 首`);
+  openPlaylistPage(playlist.id);
 }
 
 // ---------- 自动扫描 ----------
@@ -5207,6 +5852,9 @@ function initSettings() {
   bindSwitch('#lyricBackdropToggle', 'lyricBackdrop', value => {
     document.body.classList.toggle('no-cover-backdrop', !value);
   });
+  bindSwitch('#bgGlowToggle', 'bgGlow', value => {
+    document.body.classList.toggle('no-bg-glow', !value);
+  });
   bindSwitch('#autoplayImportToggle', 'autoplayImport');
   bindSwitch('#onlySongsToggle', 'onlySongs');
   bindSwitch('#restoreToggle', 'restoreLastTrack');
@@ -5292,9 +5940,70 @@ function initSettings() {
   applyThemeColor();
   applySidebarStyle();
   document.body.classList.toggle('no-cover-backdrop', !state.prefs.lyricBackdrop);
+  document.body.classList.toggle('no-bg-glow', state.prefs.bgGlow === false);
   document.body.classList.toggle('show-waveform', Boolean(state.prefs.waveform));
   initPlayerStyleControls();
   initDesktopLyricsControls();
+  initSettingsNav();
+}
+
+/**
+ * 设置页左侧分类导航：点击滚到对应分区，滚动时高亮当前分区。
+ * 滚动容器是 .main-content（整窗不滚动），所以用它的 scrollTop 而不是 window。
+ */
+function initSettingsNav() {
+  const scroller = $('.main-content');
+  const nav = $('#settingsNav');
+  const body = $('#settingsBody');
+  if (!scroller || !nav || !body) return;
+
+  const sections = $$('#settingsBody [data-settings-section]');
+  if (!sections.length) return;
+  const keyOf = section => section.dataset.settingsKey || section.id;
+  const items = $$('.settings-nav-item', nav);
+
+  const setActive = key => {
+    items.forEach(item => item.classList.toggle('active', item.dataset.jump === key));
+  };
+
+  items.forEach(item => {
+    item.addEventListener('click', () => {
+      const section = sections.find(entry => keyOf(entry) === item.dataset.jump);
+      if (!section) return;
+      const offset = section.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      // 留 2px 余量：滚到正好贴边时 sticky 的判定会抖动，往下一格更稳
+      scroller.scrollTo({ top: scroller.scrollTop + offset - 2, behavior: 'smooth' });
+      setActive(item.dataset.jump);
+    });
+  });
+
+  // 滚动时判断当前分区：取「顶部已越过视口上沿」的最后一个分区
+  let ticking = false;
+  const sync = () => {
+    ticking = false;
+    if (state.page !== 'settings') return;
+    const line = scroller.getBoundingClientRect().top + 8;
+    let current = sections[0];
+    sections.forEach(section => {
+      if (section.getBoundingClientRect().top <= line) current = section;
+    });
+    // 滚到底时最后几个分区可能都到不了判定线，强制选最后一个
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4) {
+      current = sections[sections.length - 1];
+    }
+    setActive(keyOf(current));
+  };
+  scroller.addEventListener('scroll', () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(sync);
+  }, { passive: true });
+
+  // 进设置页时先把高亮摆到第一个分区（切页时内容区会滚回顶部）
+  window.addEventListener('pagechange', event => {
+    if (event.detail === 'settings') requestAnimationFrame(sync);
+  });
+  setActive(keyOf(sections[0]));
 }
 
 /** 桌面歌词设置项绑定：开关 + 各外观滑块/取色器，改动即推给悬浮窗 */
@@ -5330,16 +6039,6 @@ function initDesktopLyricsControls() {
       syncDesktopLyricsToggle();
     });
   }
-  const openBtn = $('#dlOpenBtn');
-  if (openBtn) {
-    openBtn.addEventListener('click', async () => {
-      const on = await toggleDesktopLyrics();
-      state.prefs.desktopLyrics = on;
-      savePrefs();
-      syncDesktopLyricsToggle();
-    });
-  }
-
   // 各外观参数：改了就下发配置
   bindRange('#dlFontSize', 'dlFontSize', v => `${v} px`, () => { savePrefs(); pushDesktopLyricsConfig(); }, { number: true });
   bindRange('#dlTextDepth', 'dlTextDepth', v => `${v}%`, () => { savePrefs(); pushDesktopLyricsConfig(); }, { number: true });
@@ -5387,21 +6086,28 @@ function initDesktopLyricsControls() {
   bindSwitch('#dlLockedToggle', 'dlLocked', () => pushDesktopLyricsConfig());
 }
 
-/** 让开关与「显示桌面歌词」按钮的状态和悬浮窗实际开关保持一致 */
+/** 让设置页开关和悬浮窗实际开关状态保持一致 */
 function syncDesktopLyricsToggle() {
   const toggle = $('#desktopLyricsToggle');
   if (toggle) toggle.checked = desktopLyricsOpen;
-  const openBtn = $('#dlOpenBtn');
-  if (openBtn) openBtn.textContent = desktopLyricsOpen ? '隐藏桌面歌词' : '显示桌面歌词';
 }
 
 async function bootstrap() {
   const restored = await restoreLibrary().catch(() => 0);
-  state.favorites = new Set([...state.favorites].filter(id => getTrack(id)));
-  state.recent = state.recent.filter(id => getTrack(id));
-  // 歌单里可能留着已被移除 / 磁盘上已不存在的歌曲 id，启动时一并摘掉
+  // 在线曲目的元数据由 online.js 管，它的恢复可能比这里晚。先把能恢复的先恢复，
+  // 否则下面这段「清理失效 id」会把歌单里的网络歌曲当成脏数据整条删掉。
+  if (typeof restoreOnlineTracks === 'function') restoreOnlineTracks();
+  const keepId = id => {
+    if (getTrack(id)) return true;
+    // 在线曲目以 online: 开头（online:netease:12345）。元数据万一还没就位也先留着，
+    // 等 online.js 恢复后自然就能查到；直接删掉才是真的丢数据。
+    return typeof id === 'string' && id.startsWith('online:');
+  };
+  state.favorites = new Set([...state.favorites].filter(keepId));
+  state.recent = state.recent.filter(keepId);
+  // 歌单里可能留着已被移除 / 磁盘上已不存在的歌曲 id，启动时一并摘掉（只摘本地曲目）
   state.playlists.forEach(playlist => {
-    playlist.tracks = playlist.tracks.filter(id => getTrack(id));
+    playlist.tracks = playlist.tracks.filter(keepId);
   });
   if (restored) {
     saveState();
@@ -5468,5 +6174,4 @@ async function bootstrap() {
     }, 800);
   }
 }
-
 bootstrap();

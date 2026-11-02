@@ -1,28 +1,15 @@
 {
-  "name": "orange-music",
+  "name": "orange-music-desktop",
   "productName": "Orange Music",
-  "version": "1.3.0",
-  "description": "Orange Music —— 纯本地运行的 Windows 桌面音乐播放器，支持多格式播放、逐字同步歌词、均衡器与音效、歌单与资料库管理。",
+  "version": "1.6.9",
+  "description": "Orange Music 音乐播放器 Windows 桌面版（本地 + 在线）",
   "main": "main.js",
   "author": "Orange Music",
-  "license": "MIT",
-  "private": true,
-  "keywords": [
-    "electron",
-    "music-player",
-    "local-music",
-    "lyrics",
-    "flac",
-    "windows"
-  ],
+  "license": "UNLICENSED",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win nsis",
-    "dist:cn": "set \"ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/\" && set \"ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/\" && electron-builder --win nsis",
+    "dist": "set \"ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/\" && set \"ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/\" && electron-builder --win nsis",
     "dist:dir": "electron-builder --win dir"
-  },
-  "dependencies": {
-    "@ffmpeg-installer/ffmpeg": "^1.1.0"
   },
   "devDependencies": {
     "electron": "^33.4.11",
@@ -41,6 +28,7 @@
       "preload.js",
       "renderer/**/*",
       "assets/**/*",
+      "online/**/*",
       "package.json"
     ],
     "win": {
@@ -60,6 +48,10 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Orange Music"
-    }
+    },
+    "electronDist": "node_modules/electron/dist"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0"
   }
 }

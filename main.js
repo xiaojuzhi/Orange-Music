@@ -12,6 +12,8 @@ const { pathToFileURL } = require('url');
 
 // 标签 / 歌词解析与渲染进程共用同一份实现，避免两边各写一套（主进程负责自动扫描时用）
 const tags = require('./renderer/tags.js');
+// 在线音乐（网易云 / QQ 音乐 / 酷狗）：登录窗口、Cookie、搜索与播放直链
+const onlineMusic = require('./online');
 // 主进程直接复用 tags.js 里的文本解码（自动处理 BOM / UTF-8 / GBK），不再重复实现一份
 const { decodeTextBuffer } = tags;
 
@@ -1046,6 +1048,19 @@ function createWindow() {
   const win = new BrowserWindow(windowOptions);
   mainWindow = win;
 
+  // 开发调试：ORANGE_DEBUG=1 时把渲染进程的 console 和崩溃信息转到终端，方便定位界面问题
+  if (process.env.ORANGE_DEBUG) {
+    win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+      console.log(`[renderer] ${message} (${sourceId}:${line})`);
+    });
+    win.webContents.on('render-process-gone', (_event, details) => {
+      console.error('[renderer gone]', details);
+    });
+    win.webContents.on('did-fail-load', (_event, code, description, url) => {
+      console.error('[load failed]', code, description, url);
+    });
+  }
+
   win.on('page-title-updated', event => {
     event.preventDefault();
     win.setTitle('');
@@ -1107,6 +1122,9 @@ app.whenReady().then(() => {
 
   // 清掉上次运行留下的转码临时文件，避免长期使用后磁盘被慢慢占满
   pruneTempAudioFiles();
+
+  // 在线音乐：注册 IPC、恢复上次的登录态、给在线音频补 Referer / CORS 头
+  onlineMusic.register();
 
   createWindow();
   createTray();

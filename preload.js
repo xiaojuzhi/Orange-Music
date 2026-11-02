@@ -5,6 +5,22 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
  * 渲染进程开启 contextIsolation + sandbox，拿不到 Node，只能通过这里的白名单方法与主进程通信。
  * 命名与返回值一律「失败返回 null / false / 空串」，调用侧无需再包 try/catch。
  */
+/**
+ * 统一包一层 invoke：主进程抛出的错误会被 Electron 包成
+ * "Error invoking remote method 'xxx': Error: 真实信息"，直接抛给界面会带一长串前缀。
+ * 这里剥掉前缀，界面拿到的就是可以直接 toast 的一句话。
+ */
+const invoke = async (...args) => {
+  try {
+    return await ipcRenderer.invoke(...args);
+  } catch (error) {
+    const message = String((error && error.message) || error || '操作失败')
+      .replace(/^Error invoking remote method '[^']*':\s*/, '')
+      .replace(/^Error:\s*/, '');
+    throw new Error(message);
+  }
+};
+
 contextBridge.exposeInMainWorld('orangeDesktop', {
   platform: process.platform,
   isDesktop: true,
@@ -41,6 +57,27 @@ contextBridge.exposeInMainWorld('orangeDesktop', {
   showInFolder: filePath => ipcRenderer.invoke('show-in-folder', filePath),
   saveM3u: payload => ipcRenderer.invoke('save-m3u', payload),
   openM3u: () => ipcRenderer.invoke('open-m3u'),
+
+  // ---------- 在线音乐 ----------
+  // 登录走各站官方登录窗口，账号 Cookie 由主进程保存，这里只传音源 id
+  onlineProviders: () => invoke('online-providers'),
+  onlineLogin: source => invoke('online-login', source),
+  onlineLogout: source => invoke('online-logout', source),
+  onlineSearch: (source, keyword, options) => invoke('online-search', source, keyword, options),
+  /** 解析在线歌曲：返回 { url, type, bitrate, level, cover, lyric } */
+  onlineResolve: (track, options) => invoke('online-resolve', track, options),
+  onlineLyric: track => invoke('online-lyric', track),
+  /** 每日推荐：已登录走账号个人化，未登录按传入的本地偏好歌手搜索（options.artists） */
+  onlineDaily: (source, options) => invoke('online-daily', source, options),
+  /** 我喜欢的音乐（平台侧，需要登录） */
+  onlineLiked: source => invoke('online-liked', source),
+  /** 账号歌单 */
+  onlinePlaylists: source => invoke('online-playlists', source),
+  /** 歌单曲目：platform 歌单 id 或酷狗榜单 id（rank-xxxx） */
+  onlinePlaylistTracks: (source, id) => invoke('online-playlist-tracks', source, id),
+  /** 平台精选：网易云推荐歌单 / QQ 歌单广场 / 酷狗榜单 */
+  onlineRecommendPlaylists: source => invoke('online-recommend-playlists', source),
+  onlineOpenExternal: url => invoke('online-open-external', url),
 
   // ---------- 窗口与托盘 ----------
   setWindowBehavior: options => ipcRenderer.send('window-behavior', options),
