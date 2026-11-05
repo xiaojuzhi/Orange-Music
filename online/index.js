@@ -20,6 +20,7 @@ const netease = require('./netease');
 const qq = require('./qq');
 const kugou = require('./kugou');
 const { mergeLyrics } = require('./net');
+const { probeAudio, formatLabel } = require('./probe');
 
 const PROVIDERS = { netease, qq, kugou };
 const PROVIDER_IDS = Object.keys(PROVIDERS);
@@ -256,6 +257,9 @@ async function resolveTrack(track, options = {}) {
   // ⚠️ 这里不要做白名单过滤，否则新加的 Hi-Res / 母带档位会被悄悄改成高品质。
   const quality = typeof options.quality === 'string' && options.quality ? options.quality : 'high';
   const info = await provider.songUrl(track, { cookie, quality });
+  // 档位名只是营销标签，真实是 16bit/44.1k 还是 24bit/96k 要看文件头。
+  // 和歌词并行探测，失败不影响播放。
+  const probePromise = probeAudio(info.url, info).catch(() => null);
   let cover = track.cover || '';
   if (!cover && provider.coverFor) cover = await provider.coverFor(track, cookie).catch(() => '');
   let lyricText = info.lyric || '';
@@ -268,7 +272,20 @@ async function resolveTrack(track, options = {}) {
     }
   }
   // trial / size 也要透传：徽标要标「试听」，界面也要能提示只拿到片段
-  return { url: info.url, type: info.type, bitrate: info.bitrate, level: info.level, trial: Boolean(info.trial), cover, lyric: lyricText };
+  // format / bits / sampleRate 是探测到的实听参数（探测失败时 bits/sampleRate 为 0）
+  const probe = (await probePromise) || {};
+  return {
+    url: info.url,
+    type: info.type,
+    bitrate: info.bitrate,
+    level: info.level,
+    trial: Boolean(info.trial),
+    format: formatLabel(probe.format) || formatLabel(info.type),
+    bits: Number(probe.bits) || 0,
+    sampleRate: Number(probe.sampleRate) || 0,
+    cover,
+    lyric: lyricText
+  };
 }
 
 async function lyricOf(track) {

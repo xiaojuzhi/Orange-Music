@@ -45,6 +45,8 @@ if (result.status !== 0) {
 function findInstallDir() {
   const candidates = [
     process.env.ORANGE_MUSIC_INSTALL_DIR,
+    // 本机自定义安装位置（装的时候改过路径，NSIS 默认目录里找不到）
+    'D:\\AIlins\\本地音乐播放器\\本地播放器\\Orange Music',
     'D:\\Downloads\\Orange Music',
     path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Orange Music'),
     'C:\\Program Files\\Orange Music',
@@ -56,7 +58,13 @@ function findInstallDir() {
 }
 
 const dir = findInstallDir();
-const built = path.join(root, 'release', 'win-unpacked', 'resources', 'app.asar');
+// 打包产物可能在 release（默认）或临时输出目录（release 被占用时用的 release-build / release-out），
+// 扫所有 release* 目录取修改时间最新的 asar 来比对，避免拿旧 asar 校验出「不一致」的假警报。
+const built = fs.readdirSync(root)
+  .filter(name => /^release/.test(name))
+  .map(name => path.join(root, name, 'win-unpacked', 'resources', 'app.asar'))
+  .filter(file => fs.existsSync(file))
+  .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
 if (dir && fs.existsSync(built)) {
   const installed = path.join(dir, 'resources', 'app.asar');
   const same = fs.existsSync(installed) && fs.statSync(installed).size === fs.statSync(built).size;

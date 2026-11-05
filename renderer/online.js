@@ -393,6 +393,22 @@ function onlineQualityLabel(source, id) {
   return item ? item.label : '高品质';
 }
 
+/**
+ * 实听参数文案：格式 · 位深 · 采样率，例「FLAC · 24bit · 96kHz」。
+ * 缺哪项就少哪项，全缺返回空串（调用方回退到档位名）。
+ */
+function audioSpecText(track) {
+  if (!track) return '';
+  const parts = [];
+  const format = String(track.format || '').trim().toUpperCase();
+  if (format && format !== 'UNKNOWN') parts.push(format === 'AAC' ? 'M4A' : format);
+  const bits = Number(track.bits) || 0;
+  if (bits >= 8 && bits <= 64) parts.push(`${bits}bit`);
+  const rate = Number(track.sampleRate) || 0;
+  if (rate > 0) parts.push(`${(rate / 1000).toFixed(rate % 1000 ? 1 : 0)}kHz`);
+  return parts.join(' · ');
+}
+
 /** 换档后所有该平台的直链都失效（直链里带着音质参数） */
 function invalidateOnlineSource(source) {
   const hit = track => source ? track.source === source : true;
@@ -638,8 +654,12 @@ async function applyTrackQuality(id) {
   updatePlayerUi();
   // 说「已切换为 X」之前先确认真的拿到了 X，否则就是在骗人
   const delivery = qualityDelivery(track);
+  const spec = audioSpecText(track);
   if (delivery.wanted && !delivery.delivered) {
-    showToast(`${delivery.wanted.label}需要会员或该平台未开放，当前实听${delivery.actual}`);
+    showToast(`${delivery.wanted.label}需要会员或该平台未开放，当前实听 ${spec || delivery.actual}`);
+  } else if (spec) {
+    // 档位名是营销标签，能探测到实听参数时优先显示格式 / 位深 / 采样率
+    showToast(`音质已切换为 ${spec}`);
   } else {
     showToast(`音质已切换为${onlineQualityLabel(source, onlineQuality(source))}`);
   }
@@ -675,7 +695,11 @@ async function resolveOnlineSource(track) {
   track._src = info.url;
   track._srcAt = Date.now();
   if (info.cover) track.cover = info.cover;
-  if (info.type) track.format = String(info.type).toUpperCase();
+  // 真实格式 / 位深 / 采样率（主进程读文件头探测，格式优先用探测结果）
+  if (info.format) track.format = String(info.format).toUpperCase();
+  else if (info.type) track.format = String(info.type).toUpperCase();
+  if (info.bits) track.bits = Number(info.bits) || 0;
+  if (info.sampleRate) track.sampleRate = Number(info.sampleRate) || 0;
   if (info.level) track.qualityLabel = info.level;
   if (info.bitrate) track.bitrate = info.bitrate;
   if (info.lyric) {
@@ -1593,12 +1617,7 @@ function switchOnlineSource(id) {
   else if (OL.view === 'liked') loadLiked();
   else if (OL.view === 'playlists') loadPlatformPlaylists();
   // 首页跟着换平台：清掉旧平台那份，立刻按新平台拉
-  HOME.tracks = [];
-  HOME.mode = '';
-  HOME.source = '';
-  HOME.day = '';
-  HOME.tried = false;
-  loadHomeDaily(true);
+  resetHomeDaily();
 }
 
 function switchOnlineView(view) {
@@ -1839,6 +1858,20 @@ function writeHomeDailyCache() {
       tracks: HOME.tracks.slice(0, 30).map(persistableTrack)
     }));
   } catch {}
+}
+
+/**
+ * 换平台时作废首页那份每日推荐：
+ * 旧平台的歌不能留在首页，清干净后立刻按新平台重拉一遍。
+ * 在线页换平台、搜索页换平台都要做这套，原来是两处各写一遍。
+ */
+function resetHomeDaily() {
+  HOME.tracks = [];
+  HOME.mode = '';
+  HOME.source = '';
+  HOME.day = '';
+  HOME.tried = false;
+  loadHomeDaily(true);
 }
 
 async function loadHomeDaily(force = false) {
@@ -2264,12 +2297,7 @@ function switchGsSource(id) {
   GS.token += 1;
   runGsSearch();
   // 搜索页换平台同样会改 state.onlineSource，首页那份推荐也得跟着作废
-  HOME.tracks = [];
-  HOME.mode = '';
-  HOME.source = '';
-  HOME.day = '';
-  HOME.tried = false;
-  loadHomeDaily(true);
+  resetHomeDaily();
 }
 
 /** 把搜索页的关键词带到在线页继续看 */

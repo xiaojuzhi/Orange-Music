@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('orangeDesktop', {
   extractArtwork: sourcePath => ipcRenderer.invoke('extract-artwork', sourcePath),
   toFileUrl: filePath => ipcRenderer.invoke('to-file-url', filePath),
   coverThumbnail: filePath => ipcRenderer.invoke('cover-thumbnail', filePath),
+  /** 系统媒体面板用的方形封面（本地 file:// 图在页面里画 canvas 会跨源，只能交给主进程） */
+  coverDataUrl: (source, size) => ipcRenderer.invoke('cover-data-url', source, size),
   pathExists: filePath => ipcRenderer.invoke('path-exists', filePath),
   pathsExist: paths => ipcRenderer.invoke('paths-exist', paths),
   saveCover: dataUrl => ipcRenderer.invoke('save-cover', dataUrl),
@@ -45,6 +47,11 @@ contextBridge.exposeInMainWorld('orangeDesktop', {
   pruneCovers: keepNames => ipcRenderer.invoke('prune-covers', keepNames),
   readSidecarLyrics: audioPath => ipcRenderer.invoke('read-sidecar-lyrics', audioPath),
   readLyrics: audioPath => ipcRenderer.invoke('read-lyrics', audioPath),
+  /** 均衡预设导出 / 导入（系统文件对话框），取消返回 null */
+  saveEqPreset: payload => ipcRenderer.invoke('save-eq-preset', payload),
+  openEqPreset: () => ipcRenderer.invoke('open-eq-preset'),
+  /** LRCLIB 在线补词（内嵌歌词和同名 .lrc 都没有时的兜底），失败返回 null */
+  lrclibLyrics: query => ipcRenderer.invoke('lrclib-lyrics', query),
 
   // ---------- 扫描与批量元信息 ----------
   scanFolders: (folders, knownPaths) => ipcRenderer.invoke('scan-folders', folders, knownPaths),
@@ -85,6 +92,35 @@ contextBridge.exposeInMainWorld('orangeDesktop', {
   setTitleBarOverlay: options => ipcRenderer.send('set-title-bar-overlay', options),
   toggleMaximize: () => ipcRenderer.send('window-toggle-maximize'),
   minimize: () => ipcRenderer.send('window-minimize'),
+  closeWindow: () => ipcRenderer.send('window-close'),
+  /** 当前是否最大化（自绘按钮还原页面时补状态） */
+  isMaximized: () => invoke('window-get-maximized'),
+  /** 最大化 / 还原时回调，用于换按钮图标 */
+  onMaximizedChange: handler => ipcRenderer.on('window-maximized-changed', (_event, value) => handler(Boolean(value))),
+  /** 窗口全屏开关（F11 / 歌词页按钮） */
+  toggleFullscreen: () => ipcRenderer.send('window-toggle-fullscreen'),
+  /** 当前是否处于窗口全屏 */
+  isFullscreen: () => invoke('window-get-fullscreen'),
+  /** 主进程在全屏状态变化时回调，用于翻按钮图标、收掉自绘标题栏 */
+  onFullscreenChange: handler => ipcRenderer.on('window-fullscreen-changed', (_event, value) => handler(Boolean(value))),
+
+  // ---------- 迷你播放器小窗 ----------
+  /** 打开 / 关闭小窗，返回当前是否打开 */
+  toggleMiniPlayer: open => ipcRenderer.invoke('toggle-mini-player', open),
+  /** 主窗口侧：把播放状态推给小窗 */
+  pushMiniState: state => ipcRenderer.send('mini-state', state),
+  /** 主窗口侧：接收小窗上点出来的操作 */
+  onMiniCommand: handler => ipcRenderer.on('mini-command', (_event, command) => handler(command)),
+  /** 主窗口侧：小窗被关掉 */
+  onMiniClosed: handler => ipcRenderer.on('mini-player-closed', () => handler()),
+  /** 小窗侧：接收主窗口推来的状态 */
+  onMiniState: handler => ipcRenderer.on('mini-state', (_event, state) => handler(state)),
+  /** 小窗侧：把操作发回主窗口 */
+  sendMiniCommand: command => ipcRenderer.send('mini-command', command),
+  /** 小窗侧：关掉自己 */
+  closeMiniPlayer: () => ipcRenderer.send('mini-close'),
+  /** 小窗侧：唤起主窗口 */
+  showMainWindow: () => ipcRenderer.send('mini-show-main'),
 
   // ---------- 桌面歌词悬浮窗 ----------
   // 主窗口用：开/关桌面歌词窗口

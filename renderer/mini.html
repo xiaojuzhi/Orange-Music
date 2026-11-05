@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https: http:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>迷你播放器</title>
+  <link rel="stylesheet" href="mini.css" />
+</head>
+<body>
+  <div class="mini" id="mini">
+    <img class="mini-cover" id="miniCover" src="assets/cover-default.png" alt="" draggable="false" />
+
+    <div class="mini-body">
+      <div class="mini-head">
+        <span class="mini-title" id="miniTitle">未播放</span>
+        <span class="mini-artist" id="miniArtist"></span>
+      </div>
+      <div class="mini-lyric" id="miniLyric">导入歌曲后开始播放</div>
+      <div class="mini-seek">
+        <input class="mini-range" id="miniSeek" type="range" min="0" max="1000" value="0" aria-label="播放进度" />
+        <span class="mini-time" id="miniTime">0:00</span>
+      </div>
+    </div>
+
+    <div class="mini-controls">
+      <button class="mini-btn" id="miniPrev" aria-label="上一首" title="上一首">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2.2v14H6zM20 5v14L9.6 12z"/></svg>
+      </button>
+      <button class="mini-btn is-play" id="miniPlay" aria-label="播放" title="播放">
+        <svg viewBox="0 0 24 24" fill="currentColor" id="miniPlayIcon"><path d="M8 5.2v13.6L19.2 12z"/></svg>
+      </button>
+      <button class="mini-btn" id="miniNext" aria-label="下一首" title="下一首">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.8 5H18v14h-2.2zM4 5v14l10.4-7z"/></svg>
+      </button>
+    </div>
+
+    <div class="mini-actions">
+      <button class="mini-ghost" id="miniExpand" aria-label="回到主窗口" title="回到主窗口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-7 7"/><path d="M10 20H4v-6"/><path d="M4 20l7-7"/></svg>
+      </button>
+      <button class="mini-ghost" id="miniClose" aria-label="关闭小窗" title="关闭小窗">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+  </div>
+  <script src="mini.js"></script>
+</body>
+</html>

@@ -46,7 +46,9 @@ button, input, textarea { font: inherit; letter-spacing: 0; }
 button { color: inherit; }
 button, .track-row, .album-card, .playlist-card, .recommend-card { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, input:focus-visible, textarea:focus-visible {
-  outline: 3px solid rgba(24, 119, 242, .28);
+  /* 原先是浏览器默认的蓝色（#1877f2），和应用的红橙色主色完全打架 ——
+     弹窗一打开焦点落在关闭按钮上，会看到一个突兀的蓝圈。统一走主色。 */
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
   outline-offset: 2px;
 }
 img { display: block; max-width: 100%; }
@@ -87,21 +89,6 @@ h3 { font-size: 16px; margin-bottom: 8px; }
   font-size: 18px;
   font-weight: 760;
 }
-.brand-mark {
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  border: 1px solid rgba(255,255,255,.22);
-  border-radius: 50%;
-  background: #fff;
-}
-.brand-mark i { display: block; width: 3px; border-radius: 4px; background: var(--accent); }
-.brand-mark i:nth-child(1) { height: 9px; }
-.brand-mark i:nth-child(2) { height: 17px; background: var(--accent-2); }
-.brand-mark i:nth-child(3) { height: 12px; background: var(--green); }
 .primary-nav, .sidebar-section { display: grid; gap: 5px; }
 .nav-item, .sidebar-link {
   width: 100%;
@@ -123,15 +110,6 @@ h3 { font-size: 16px; margin-bottom: 8px; }
 .nav-item.active .icon { color: #ff796d; }
 .sidebar-link span, .sidebar-link > span:last-child { margin-left: auto; font-size: 12px; }
 .sidebar-section { margin-top: 26px; }
-.sidebar-label {
-  padding: 0 11px 7px;
-  color: #74777e;
-  font-size: 11px;
-  font-weight: 750;
-  text-transform: uppercase;
-}
-.sidebar-label-row { display: flex; align-items: center; justify-content: space-between; }
-.sidebar-label-row .sidebar-label { padding-bottom: 7px; }
 .icon-button {
   width: 36px;
   height: 36px;
@@ -172,79 +150,11 @@ h3 { font-size: 16px; margin-bottom: 8px; }
 .storage-card strong, .storage-card span { display: block; }
 .storage-card strong { font-size: 13px; }
 .storage-card span { color: var(--sidebar-muted); font-size: 11px; }
-.profile-button {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 12px;
-  padding: 9px;
-  border: 0;
-  border-radius: 7px;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-.profile-button:hover { background: rgba(255,255,255,.07); }
-.profile-button .avatar, .large-avatar {
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  font-weight: 800;
-}
-.profile-button .avatar { width: 34px; height: 34px; }
-.profile-button > span:nth-child(2) { min-width: 0; flex: 1; }
-.profile-button strong, .profile-button small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.profile-button strong { font-size: 13px; }
-.profile-button small { color: var(--sidebar-muted); font-size: 11px; }
-.profile-button > .icon { width: 16px; color: var(--sidebar-muted); }
 .main-content {
   min-height: 100vh;
   margin-left: 232px;
   padding: 0 34px calc(var(--player-h) + 44px);
 }
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 15;
-  min-height: 76px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  background: color-mix(in srgb, var(--bg) 91%, transparent);
-  backdrop-filter: blur(16px);
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 74%, transparent);
-}
-.history-controls { display: flex; }
-.history-controls .icon-button { background: var(--surface); border: 1px solid var(--line); margin-right: 6px; }
-.search-box {
-  width: min(440px, 48vw);
-  height: 42px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 12px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: var(--surface-2);
-  color: var(--muted);
-  transition: .18s ease;
-}
-.search-box:focus-within { border-color: var(--accent-2); background: var(--surface); box-shadow: 0 0 0 3px rgba(24,119,242,.12); }
-.search-box input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--ink); }
-.search-box kbd {
-  padding: 2px 6px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--surface);
-  font-family: inherit;
-  font-size: 10px;
-  white-space: nowrap;
-}
-.topbar > .button:last-child { margin-left: auto; }
 .button {
   min-height: 40px;
   display: inline-flex;
@@ -283,16 +193,6 @@ h3 { font-size: 16px; margin-bottom: 8px; }
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
-}
-.format-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
-.format-legend span {
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--surface);
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 800;
 }
 
 .feature-card {
@@ -391,13 +291,14 @@ h3 { font-size: 16px; margin-bottom: 8px; }
   min-width: 0;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  /* 原来是 8px 方角，同一页里歌单卡/专辑卡是 14~20px，卡片圆角各走各的。 */
+  border-radius: var(--r-md);
   background: var(--surface);
   cursor: pointer;
   transition: .18s ease;
 }
 .recommend-card:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
-.recommend-cover { position: relative; aspect-ratio: 1; overflow: hidden; border-radius: 6px; }
+.recommend-cover { position: relative; aspect-ratio: 1; overflow: hidden; border-radius: var(--r-sm); }
 .recommend-cover img { width: 100%; height: 100%; object-fit: cover; transition: transform .3s ease; }
 .recommend-card:hover img { transform: scale(1.035); }
 .card-play {
@@ -466,7 +367,7 @@ h3 { font-size: 16px; margin-bottom: 8px; }
   font-size: 10px;
   font-weight: 800;
 }
-.track-format.lossless { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); color: var(--green); }
+.track-format.lossless { border-color: color-mix(in srgb, var(--gold) 45%, var(--line)); color: var(--gold); }
 .track-actions { display: flex; align-items: center; justify-content: flex-end; opacity: 0; }
 .track-row:hover .track-actions, .track-row.playing .track-actions { opacity: 1; }
 .track-actions .icon-button { width: 32px; height: 32px; }
@@ -480,31 +381,6 @@ h3 { font-size: 16px; margin-bottom: 8px; }
   text-align: center;
 }
 .empty-state strong { display: block; margin-bottom: 4px; color: var(--ink); }
-.library-hero {
-  min-height: 244px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 30px;
-  margin: 34px -34px 0;
-  padding: 42px 34px 34px;
-  background: #252931;
-  color: #fff;
-}
-.library-profile { display: flex; align-items: center; gap: 24px; }
-.large-avatar { width: 106px; height: 106px; font-size: 42px; box-shadow: inset 0 0 0 5px rgba(255,255,255,.16); }
-.library-profile .eyebrow { color: #ff8c82; }
-.library-profile h1 { font-size: 44px; }
-.library-profile p:last-child { margin: 9px 0 0; color: #aeb4bd; }
-.library-actions { display: flex; gap: 10px; }
-.library-tabs {
-  display: flex;
-  gap: 28px;
-  margin: 0 -34px;
-  padding: 0 34px;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
-}
 .library-tab {
   min-height: 58px;
   border: 0;
@@ -523,6 +399,8 @@ h3 { font-size: 16px; margin-bottom: 8px; }
 .playlist-card, .album-card {
   min-width: 0;
   overflow: hidden;
+  /* 卡片右下角的播放圆钮是 absolute，卡片要作为定位参照 */
+  position: relative;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -570,34 +448,6 @@ body.dark .playlist-cover .playlist-symbol { background: #28313d; }
 .playlist-info span { margin-top: 4px; color: var(--muted); font-size: 12px; }
 .album-card img { width: 100%; aspect-ratio: 1; object-fit: cover; }
 
-.format-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 14px; }
-.format-card { padding: 22px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
-.format-code {
-  display: inline-block;
-  margin-bottom: 22px;
-  padding: 5px 7px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--accent-2);
-  font-size: 11px;
-  font-weight: 850;
-}
-.format-code.lossless { color: var(--green); border-color: color-mix(in srgb, var(--green) 50%, var(--line)); }
-.format-code.muted { color: var(--gold); }
-.format-card p { min-height: 42px; margin-bottom: 16px; color: var(--muted); }
-.format-card strong { color: var(--green); font-size: 12px; }
-.info-banner {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  margin-top: 18px;
-  padding: 15px 17px;
-  border: 1px solid color-mix(in srgb, var(--accent-2) 24%, var(--line));
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--accent-2) 6%, var(--surface));
-  color: var(--muted);
-}
-.info-banner .icon { color: var(--accent-2); }
 .settings-list { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .setting-row {
   min-height: 70px;
@@ -635,7 +485,7 @@ body.dark .playlist-cover .playlist-symbol { background: #28313d; }
   box-shadow: 0 2px 6px rgba(0,0,0,.25);
   transition: .2s ease;
 }
-.switch:checked { background: var(--green); }
+.switch:checked { background: var(--accent); }
 .switch:checked::after { transform: translateX(19px); }
 /* 底部播放浮窗内部的次要文字与图标配色。
    浮窗是半透明模糊面板，背后是任意专辑封面：压到深色封面上时，面板实际背景
@@ -650,7 +500,10 @@ body.dark { --bar-muted: color-mix(in srgb, var(--ink) 30%, var(--muted)); }
   inset: auto 0 0;
   height: var(--player-h);
   display: grid;
-  grid-template-columns: minmax(240px, .8fr) minmax(360px, 1.4fr) minmax(260px, .8fr);
+  /* 以前两侧是 minmax(240px,…) / minmax(260px,…)，加起来 944px 是硬下限。
+     窗口一旦窄于它，右侧「队列 / 音量 / 全屏」就被推出屏幕外点不到。
+     改成两侧都可收缩到 0，右侧工具列按内容排布并允许被压缩。 */
+  grid-template-columns: minmax(0, .85fr) minmax(150px, 1.35fr) minmax(0, auto);
   align-items: center;
   gap: 20px;
   padding: 10px 22px;
@@ -717,7 +570,23 @@ input[type="range"]::-webkit-slider-thumb {
 }
 input[type="range"]:hover::-webkit-slider-thumb { opacity: 1; }
 input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 2px solid var(--surface); border-radius: 50%; background: var(--accent); }
-.mini-tools { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.mini-tools { display: flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; }
+.mini-tools > * { flex: none; }
+/* 1120px 那条 display:none 一直被后面的宽度规则挡住，这里用更高的
+   选择器强度明确收掉音量滑块，把空间留给传输控制。 */
+@media (max-width: 1180px) {
+  .mini-player .volume-control input { display: none !important; }
+  .mini-player .volume-control { padding-right: 2px; }
+}
+/* 再窄一档：右侧工具区放不下五个入口 + 音量 + 全屏，最后那个「全屏」会被挤出屏幕。
+   收掉两个低频入口（桌面歌词、播放队列），按钮也缩到 32px —— 这两个功能在
+   播放页和侧栏都还有别的入口，不算功能缺失。 */
+@media (max-width: 1080px) {
+  .mini-player .mini-tools [data-action="open-desktop-lyrics"],
+  .mini-player .mini-tools [data-action="open-queue"] { display: none !important; }
+  .mini-player .mini-tools .icon-button { width: 32px; height: 32px; }
+  .mini-player .seek-row { grid-template-columns: 36px 1fr 36px; gap: 6px; }
+}
 .mini-tools > .icon-button { color: var(--bar-muted); }
 .volume-control { display: flex; align-items: center; gap: 7px; }
 .volume-control input { width: 78px; }
@@ -737,14 +606,6 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 2px s
   transition: .28s ease;
 }
 .full-player.open { opacity: 1; visibility: visible; transform: none; }
-.full-player-top {
-  display: grid;
-  grid-template-columns: 44px 1fr 44px;
-  align-items: center;
-  text-align: center;
-}
-.full-player-top strong, .full-player-top span { display: block; }
-.full-player-top span { color: #8f949e; font-size: 11px; }
 .icon-button.light:hover { background: rgba(255,255,255,.1); }
 .full-stage {
   width: min(1120px, 100%);
@@ -781,10 +642,6 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 2px s
 .full-transport .icon-button { width: 44px; height: 44px; }
 .full-transport .icon-button.active { color: #ff6658; }
 .lyrics-box { margin-top: 35px; }
-.lyrics-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
-.lyrics-head > span { display: flex; align-items: center; gap: 7px; color: #aaaeb7; font-size: 12px; font-weight: 700; }
-.lyrics-head .icon { width: 16px; }
-.lyrics-head > div { display: flex; gap: 14px; }
 .lyrics-scroll {
   height: 176px;
   overflow-y: auto;
@@ -895,7 +752,7 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 2px s
 }
 .text-input { height: 44px; padding: 0 13px; }
 .text-area { min-height: 260px; padding: 13px; resize: vertical; line-height: 1.6; }
-.text-input:focus, .text-area:focus { border-color: var(--accent-2); outline: 0; box-shadow: 0 0 0 3px rgba(24,119,242,.12); }
+.text-input:focus, .text-area:focus { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
 .add-choice {
   width: 100%;
   min-height: 52px;
@@ -1036,7 +893,6 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 2px s
 }
 
 .button.secondary { color: var(--ink); }
-.library-hero .button.secondary { color: var(--ink); }
 
 @media (max-width: 860px) {
   .sidebar { bottom: 0; }
@@ -1078,23 +934,9 @@ body.dark .mini-player {
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  background: linear-gradient(105deg, rgba(255,255,255,.24), rgba(255,255,255,0) 42%, rgba(24,119,242,.045) 100%);
+  background: linear-gradient(105deg, rgba(255,255,255,.24), rgba(255,255,255,0) 42%, color-mix(in srgb, var(--accent) 5%, transparent) 100%);
 }
 
-.back-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 30px;
-  padding: 7px 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font-weight: 700;
-}
-.back-link:hover { color: var(--ink); }
-.back-link .icon { width: 17px; transform: rotate(180deg); }
 .import-intro { padding-top: 20px; }
 .page-subtitle { max-width: 650px; margin: 12px 0 0; color: var(--muted); font-size: 15px; }
 .import-layout {
@@ -1103,7 +945,7 @@ body.dark .mini-player {
   gap: 18px;
   align-items: stretch;
 }
-.import-main, .import-guide {
+.import-main {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -1130,7 +972,7 @@ body.dark .mini-player {
 .desktop-drop-zone:hover, .desktop-drop-zone.drag {
   border-color: var(--accent-2);
   transform: translateY(-2px);
-  box-shadow: 0 16px 34px rgba(24,119,242,.10);
+  box-shadow: 0 16px 34px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .desktop-drop-zone strong { color: var(--ink); font-size: 19px; }
 .desktop-drop-zone small { color: var(--accent-2); font-weight: 750; }
@@ -1169,36 +1011,6 @@ body.dark .mini-player {
   background: var(--surface-3);
 }
 .scan-progress i { display: block; width: 4%; height: 100%; background: var(--green); transition: width .28s ease; }
-.import-guide { padding: 24px; }
-.import-guide h2 { margin-bottom: 22px; }
-.guide-list { display: grid; gap: 20px; margin: 0; padding: 0; list-style: none; }
-.guide-list li { display: flex; gap: 13px; align-items: flex-start; }
-.guide-list li > span {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  flex: none;
-  border-radius: 50%;
-  background: var(--ink);
-  color: var(--bg);
-  font-size: 12px;
-  font-weight: 800;
-}
-.guide-list strong, .guide-list small { display: block; }
-.guide-list small { margin-top: 3px; color: var(--muted); line-height: 1.5; }
-.privacy-note {
-  display: flex;
-  gap: 9px;
-  margin-top: 26px;
-  padding: 13px;
-  border-radius: 7px;
-  background: var(--surface-2);
-  color: var(--muted);
-  font-size: 12px;
-}
-.privacy-note .icon { width: 17px; color: var(--accent-2); flex: none; }
-.import-result-section { padding-top: 42px; }
 
 @media (max-width: 980px) {
   .import-layout { grid-template-columns: 1fr; }
@@ -1210,11 +1022,6 @@ body.dark .mini-player {
 }
 
 /* Chinese UI cleanup and opaque top window */
-.topbar {
-  background: var(--surface) !important;
-  -webkit-backdrop-filter: none !important;
-  backdrop-filter: none !important;
-}
 .storage-card {
   width: 100%;
   color: inherit;
@@ -1223,7 +1030,7 @@ body.dark .mini-player {
   cursor: pointer;
 }
 .storage-card:hover { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.08); }
-.storage-card:focus-visible { outline: 3px solid rgba(24,119,242,.35); outline-offset: 2px; }
+.storage-card:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 38%, transparent); outline-offset: 2px; }
 
 /* Full-white interface, frosted sidebar and simplified import page */
 html, body, body.dark {
@@ -1249,7 +1056,6 @@ html, body, body.dark {
   box-shadow: inset 3px 0 0 #e84b3c;
 }
 .sidebar .nav-item.active .icon { color: #e84b3c; }
-.sidebar-label { color: #969ca5 !important; }
 .sidebar-footer { color: #17181b; }
 .storage-card {
   color: #17181b !important;
@@ -1259,10 +1065,6 @@ html, body, body.dark {
 }
 .storage-card span { color: #777e88 !important; }
 .storage-icon { background: rgba(232, 75, 60, .10) !important; color: #e84b3c !important; }
-.profile-button { color: #17181b !important; }
-.profile-button:hover { background: rgba(18, 22, 28, .055) !important; }
-.profile-button small { color: #7c828c !important; }
-.profile-button > .icon { color: #8a9099 !important; }
 
 .import-layout { grid-template-columns: minmax(0, 1fr) !important; }
 .import-main { width: 100%; }
@@ -1292,14 +1094,6 @@ html, body, body.dark {
 .sidebar, .queue-drawer, .full-player, .modal-card { scrollbar-color: rgba(255,255,255,.74) rgba(255,255,255,.16); }
 
 /* Orange Music layout refinements */
-.topbar { gap: 0; }
-.search-box {
-  flex: 1 1 auto;
-  width: 100%;
-  max-width: none;
-  min-width: 0;
-}
-.search-box input { min-width: 0; }
 
 .settings-list {
   display: flex;
@@ -1321,11 +1115,6 @@ html, body, body.dark {
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(110, 118, 130, .52) !important; }
 /* Restore compact search field, stretch top bar surface, and refine scrollbars */
-.search-box {
-  flex: 0 1 auto;
-  width: min(440px, 48vw);
-  max-width: 440px;
-}
 @media (min-width: 861px) {
   .topbar {
     margin-inline: -34px;
@@ -1344,7 +1133,6 @@ body::-webkit-scrollbar-thumb {
   border: 0 !important;
 }
 /* Simplified navigation requested by user */
-.library-tabs { margin-top: 0; }
 /* Search page, nav-style settings card, and floating player */
 .search-page-bar {
   position: sticky;
@@ -1522,12 +1310,10 @@ body::-webkit-scrollbar-thumb {
   min-height: 0;
   margin-top: 24px;
   padding: 0;
+  /* 提示文字是 absolute 定位的；父级没有定位上下文时它会跑到整页右上角，
+     和全屏按钮挤在一起。 */
+  position: relative;
 }
-.lyrics-head {
-  margin-bottom: 4px;
-  opacity: .55;
-}
-.lyrics-head > span { color: #a5b1aa; }
 .lyrics-scroll {
   height: min(58vh, 560px);
   padding: 8px 0 70px;
@@ -1546,7 +1332,6 @@ body::-webkit-scrollbar-thumb {
   font-weight: 750;
 }
 .lyric-line.current { transform: none; }
-.full-player-top { color: #dce5df; }
 
 @media (max-width: 860px) {
   .full-info {
@@ -1633,28 +1418,6 @@ body::-webkit-scrollbar-thumb {
 .lyric-line.active { color: #fff; }
 
 /* Lyrics header alignment */
-.lyrics-head {
-  justify-content: flex-start;
-  gap: 18px;
-}
-.lyrics-head > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 14px;
-  font-weight: 650;
-}
-.lyrics-head > div {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-.lyrics-head .text-button {
-  font-size: 14px;
-  font-weight: 650;
-  color: inherit;
-  opacity: .62;
-}
 
 /* Full-player refinements */
 .full-back {
@@ -1665,14 +1428,6 @@ body::-webkit-scrollbar-thumb {
   color: #dce5df;
 }
 .full-back:hover { background: rgba(255,255,255,.12); }
-.full-format {
-  width: min(48vh, 500px);
-  margin-top: -3px;
-  color: #a5b1aa;
-  font-size: 11px;
-  text-align: center;
-  letter-spacing: .02em;
-}
 .full-info {
   padding-left: clamp(18px, 4vw, 72px);
 }
@@ -1683,8 +1438,10 @@ body::-webkit-scrollbar-thumb {
 /* Songs section actions and final lyrics alignment */
 .section-header { flex-wrap: wrap; }
 .local-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* 歌曲页的格式筛选：section-header 是 flex-wrap，宽屏下它会被挤到同一行最右端，
+   和左边五个按钮挤成一排、贴到窗口边缘。强制它独占一行。 */
+.section-header > .filter-chips#formatFilters { flex: 1 0 100%; margin-top: 2px; }
 .full-info { padding-left: clamp(34px, 6vw, 104px); }
-.full-art-wrap .full-format { margin-top: -13px; }
 .full-art-wrap .full-transport { margin-top: 4px; }
 
 /* Auto-hiding main scrollbar */
@@ -2031,31 +1788,6 @@ body::-webkit-scrollbar { display: none !important; width: 0 !important; height:
   justify-content: center;
   margin: 0;
 }
-.lyrics-head {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 12px;
-  opacity: .78;
-}
-.lyrics-head > div { display: flex; align-items: center; gap: 14px; }
-.lyrics-head .text-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  opacity: .62;
-}
-.lyrics-head .text-button:hover { opacity: 1; background: none; }
-.lyrics-head .icon { width: 14px; height: 14px; }
 .lyrics-scroll {
   height: min(72vh, 700px);
   padding: clamp(10px, 1.8vh, 22px) 8px clamp(30px, 6vh, 60px) 0;
@@ -2173,7 +1905,6 @@ body.no-cover-backdrop .full-player::before { display: none; }
   color: var(--muted);
   font-size: 13px;
 }
-.shortcut-plus { color: var(--muted); font-size: 12px; }
 kbd {
   min-width: 32px;
   padding: 3px 9px;
@@ -2192,27 +1923,7 @@ kbd {
 
 /* 歌单删除按钮 */
 .playlist-card { position: relative; }
-.playlist-delete {
-  position: absolute;
-  z-index: 4;
-  top: 10px;
-  right: 10px;
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 50%;
-  background: rgba(12, 14, 18, .55);
-  color: #fff;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity .18s ease, background .18s ease;
-}
 .playlist-card:hover .playlist-delete,
-.playlist-delete:focus-visible { opacity: 1; }
-.playlist-delete:hover { background: var(--accent); }
-.playlist-delete .icon { width: 15px; height: 15px; }
 
 /* 滑块已播放 / 已调节部分填充 */
 #seekSlider,
@@ -2615,6 +2326,128 @@ body.theme-sakura {
    新增功能样式：均衡器 / 自动扫描 / 详情 / 编辑 / 查重 / 歌单管理 / 睡眠定时器
    ========================================================================== */
 .eq-row { align-items: flex-start !important; }
+/* 耳机校正：型号有几百款，原生下拉翻不动，换成「胶囊按钮 + 带搜索的弹层」 */
+.eq-hp-trigger {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: min(300px, 52%);
+  height: 40px;
+  padding: 0 14px 0 16px;
+  border: 1px solid var(--glass-edge, var(--line));
+  border-radius: 999px;
+  background: var(--glass, var(--surface));
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color .16s ease, color .16s ease;
+}
+.eq-hp-trigger:hover { border-color: color-mix(in srgb, var(--ink) 20%, transparent); }
+.eq-hp-trigger .eq-hp-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eq-hp-trigger .eq-hp-caret {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  opacity: .42;
+  transform: rotate(90deg);
+  transition: transform .18s ease;
+}
+.eq-hp-trigger[aria-expanded="true"] .eq-hp-caret { transform: rotate(-90deg); }
+.eq-hp-trigger.has-value { color: var(--accent); }
+
+.eq-hp-pop {
+  position: fixed;
+  z-index: 130;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-height: min(448px, 72vh);
+  border: 1px solid var(--glass-edge, var(--line));
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 18px 46px rgba(16, 18, 22, .24);
+  overflow: hidden;
+}
+.eq-hp-pop[hidden] { display: none; }
+.eq-hp-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.eq-hp-search .icon { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.eq-hp-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  outline: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.eq-hp-search input::placeholder { color: var(--muted); }
+/* 全局 input:focus 会给一圈 3px 的 accent 描边，放在这个弹层里像报错，收掉 */
+.eq-hp-search input:focus,
+.eq-hp-search input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+.eq-hp-esc {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font: 500 10px/1.5 ui-monospace, SFMono-Regular, monospace;
+}
+.eq-hp-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  overscroll-behavior: contain;
+}
+.eq-hp-group {
+  padding: 9px 10px 5px;
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  color: var(--muted);
+}
+.eq-hp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+.eq-hp-item .eq-hp-brand { flex: none; color: var(--muted); font-size: 12px; }
+.eq-hp-item .eq-hp-model { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eq-hp-item .icon { width: 14px; height: 14px; flex: none; color: var(--accent); }
+.eq-hp-item:hover,
+.eq-hp-item.is-active { background: var(--surface-2); }
+.eq-hp-item.is-selected { color: var(--accent); }
+.eq-hp-item.is-selected .eq-hp-brand { color: color-mix(in srgb, var(--accent) 55%, var(--muted)); }
+.eq-hp-empty { padding: 26px 12px; text-align: center; color: var(--muted); font-size: 13px; }
+.eq-hp-foot {
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+/* 出处那行小字是第二个 <small>，.setting-row small 的 display:block 会盖掉 hidden，得单独收掉 */
+.setting-row small#eqHeadphoneHint { margin-top: 5px; font-size: 11px; opacity: .78; }
+.setting-row small#eqHeadphoneHint[hidden] { display: none; }
 .eq-bands {
   display: flex;
   gap: 10px;
@@ -2711,32 +2544,12 @@ body.theme-sakura {
 .playlist-cover-actions { display: flex; flex-direction: column; gap: 8px; }
 
 .playlist-edit,
-.playlist-export {
-  position: absolute;
-  z-index: 4;
-  top: 10px;
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 50%;
-  background: rgba(12, 14, 18, .55);
-  color: #fff;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity .18s ease, background .18s ease;
-}
 .playlist-edit { right: 46px; }
-.playlist-export { right: 82px; }
 .playlist-card:hover .playlist-edit,
 .playlist-card:hover .playlist-export,
 .playlist-edit:focus-visible,
-.playlist-export:focus-visible { opacity: 1; }
 .playlist-edit:hover,
-.playlist-export:hover { background: var(--accent); }
 .playlist-edit .icon,
-.playlist-export .icon { width: 15px; height: 15px; }
 
 .sleep-chip {
   display: inline-flex;
@@ -2762,7 +2575,6 @@ body.theme-sakura {
 .full-player.lyric-light .full-title-row h2 { color: #17181b; }
 .full-player.lyric-light .full-title-row p,
 .full-player.lyric-light .full-seek-meta,
-.full-player.lyric-light .lyrics-head { color: rgba(38, 42, 48, .62); }
 .full-player.lyric-light .full-back { color: #17181b; }
 .full-player.lyric-light .full-back:hover { background: rgba(0, 0, 0, .06); }
 .full-player.lyric-light .full-transport .icon-button { color: rgba(23, 24, 27, .78); }
@@ -3012,7 +2824,13 @@ body.theme-sakura {
   font-weight: 500;
 }
 .lyric-source[hidden] { display: none; }
-.full-player .lyric-source { color: rgba(226, 236, 231, .5); }
+.full-player .lyric-source {
+  color: rgba(226, 236, 231, .5);
+  /* 贴歌词区左上角。原来的 right:0 会让它落进右上角的全屏按钮/窗控区。 */
+  top: -20px;
+  left: 0;
+  right: auto;
+}
 .full-player.lyric-light .lyric-source { color: rgba(38, 42, 48, .5); }
 
 .full-player .lyric-line { filter: blur(var(--lyric-blur, 0px)); }
@@ -4418,10 +4236,12 @@ html, body { color: var(--ink) !important; }
 body {
   background-color: var(--bg, #f5f5f7) !important;
   background-image:
-    radial-gradient(62% 56% at 10% 2%, color-mix(in srgb, var(--accent) 40%, transparent), transparent 72%),
-    radial-gradient(58% 52% at 92% 0%, rgba(58, 126, 255, .38), transparent 72%),
-    radial-gradient(72% 62% at 78% 96%, rgba(150, 94, 255, .34), transparent 74%),
-    radial-gradient(56% 54% at 16% 98%, color-mix(in srgb, var(--accent) 26%, transparent), transparent 72%),
+    /* 光斑全部收在主色系里。原来右上角是纯蓝 #3a7eff、右下角是紫 #965eff，
+       四片光晕红蓝紫混着来，整页背景说不上是哪种色调，和红色主色也打架。 */
+    radial-gradient(62% 56% at 10% 2%, color-mix(in srgb, var(--accent) 36%, transparent), transparent 72%),
+    radial-gradient(58% 52% at 92% 0%, color-mix(in srgb, var(--accent) 20%, #ffce9e), transparent 74%),
+    radial-gradient(72% 62% at 78% 96%, color-mix(in srgb, var(--accent) 15%, #ffdcc2), transparent 76%),
+    radial-gradient(56% 54% at 16% 98%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 72%),
     linear-gradient(178deg, #fcfcfe 0%, var(--bg, #f5f5f7) 46%, #eef0f6 100%) !important;
   background-attachment: fixed !important;
   background-repeat: no-repeat !important;
@@ -4430,10 +4250,10 @@ body {
 body.dark {
   background-color: var(--bg, #111216) !important;
   background-image:
-    radial-gradient(62% 56% at 10% 2%, color-mix(in srgb, var(--accent) 32%, transparent), transparent 70%),
-    radial-gradient(58% 52% at 92% 0%, rgba(40, 88, 214, .40), transparent 70%),
-    radial-gradient(72% 62% at 78% 96%, rgba(108, 58, 208, .36), transparent 72%),
-    radial-gradient(56% 54% at 16% 98%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 70%),
+    radial-gradient(62% 56% at 10% 2%, color-mix(in srgb, var(--accent) 30%, transparent), transparent 70%),
+    radial-gradient(58% 52% at 92% 0%, color-mix(in srgb, var(--accent) 16%, #2a1a12), transparent 72%),
+    radial-gradient(72% 62% at 78% 96%, color-mix(in srgb, var(--accent) 13%, #2b1c15), transparent 74%),
+    radial-gradient(56% 54% at 16% 98%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 70%),
     linear-gradient(178deg, #16181e 0%, var(--bg, #111216) 46%, #0c0d11 100%) !important;
 }
 
@@ -4469,13 +4289,6 @@ body.dark::before {
   backdrop-filter: blur(44px) saturate(200%) !important;
 }
 .main-content { background: transparent !important; }
-.topbar {
-  background: color-mix(in srgb, var(--glass) 72%, transparent) !important;
-  border-bottom: 0 !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5), 0 1px 0 var(--glass-line);
-  -webkit-backdrop-filter: blur(var(--lg-blur)) saturate(var(--lg-sat)) !important;
-  backdrop-filter: blur(var(--lg-blur)) saturate(var(--lg-sat)) !important;
-}
 
 /* 侧栏项：胶囊高亮，选中用主色玻璃片而不是左侧硬竖条 */
 .sidebar .nav-item,
@@ -4511,7 +4324,6 @@ body.dark .sidebar .nav-item.active {
   transform: translateY(-1px);
   box-shadow: var(--glass-inner-hi), var(--glass-shadow-lift) !important;
 }
-.sidebar .profile-button { border-radius: var(--r-md) !important; }
 
 /* ── 3. 控件：按钮 / 图标按钮 / 输入 / 分段控件 ───────────────────────── */
 .button {
@@ -4570,28 +4382,7 @@ body.dark .sidebar .nav-item.active {
 body.dark .icon-button:hover { background: rgba(255, 255, 255, .12); }
 .icon-button:active { transform: scale(.92); }
 .sidebar .icon-button:hover { background: rgba(18, 22, 28, .08) !important; }
-.history-controls .icon-button {
-  background: var(--glass) !important;
-  border: 1px solid var(--glass-edge) !important;
-  box-shadow: var(--glass-inner-hi), var(--glass-shadow) !important;
-  -webkit-backdrop-filter: blur(20px) saturate(170%);
-  backdrop-filter: blur(20px) saturate(170%);
-}
 
-.search-box {
-  border-radius: 999px !important;
-  border: 1px solid var(--glass-edge) !important;
-  background: var(--glass) !important;
-  box-shadow: var(--glass-inner-hi), inset 0 1px 2px rgba(31, 35, 43, .04) !important;
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
-  transition: box-shadow .22s var(--ease-glass), background .2s ease, border-color .2s ease !important;
-}
-.search-box:focus-within {
-  background: var(--glass-strong) !important;
-  border-color: color-mix(in srgb, var(--accent-2) 45%, var(--glass-edge)) !important;
-  box-shadow: var(--glass-inner-hi), 0 0 0 4px color-mix(in srgb, var(--accent-2) 16%, transparent) !important;
-}
 .search-box kbd,
 .chip {
   border-radius: 999px !important;
@@ -4717,8 +4508,12 @@ body.dark .ol-quality-opt.active { background: rgba(255, 255, 255, .18) !importa
   border-radius: var(--r-md) !important;
 }
 .feature-card {
-  border-radius: var(--r-xl) !important;
-  box-shadow: 0 30px 70px rgba(16, 20, 28, .28), inset 0 1px 0 rgba(255, 255, 255, .12),
+  border-radius: var(--r-lg) !important;
+  /* 深色沉浸卡放在浅色玻璃页面上原本像贴了一块黑板；
+     补一圈主色辉光让它和页面底色发生关系。 */
+  box-shadow: 0 24px 56px rgba(16, 20, 28, .26),
+              0 12px 40px color-mix(in srgb, var(--accent) 16%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, .12),
               inset 0 0 0 1px rgba(255, 255, 255, .07) !important;
   overflow: hidden;
 }
@@ -4748,7 +4543,8 @@ body.dark .ol-quality-opt.active { background: rgba(255, 255, 255, .18) !importa
   border-color: color-mix(in srgb, var(--accent) 22%, transparent) !important;
   box-shadow: var(--glass-inner-hi), 0 6px 18px color-mix(in srgb, var(--accent) 12%, transparent) !important;
 }
-.track-row img, .track-cover, .ol-row img { border-radius: 10px !important; }
+.track-row img,
+.ol-row img { border-radius: 10px !important; }
 .ol-row { border-radius: var(--r-md) !important; transition: background .18s ease, box-shadow .2s var(--ease-glass) !important; }
 .ol-row:hover {
   background: var(--glass) !important;
@@ -4868,8 +4664,10 @@ input[type="range"]:active::-webkit-slider-thumb { transform: scale(.96); }
   transition: transform .26s var(--ease-glass) !important;
 }
 .switch:checked {
-  background: linear-gradient(180deg, #34c759, #28b14e) !important;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 1px rgba(52, 199, 89, .25) !important;
+  /* 原来硬编码 iOS 绿（#34c759）并加了 !important，把 2914 行的 var(--accent)
+     完全压掉了 —— 设置页一屏红色主题里全是绿开关。改回主色。 */
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent)) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent) !important;
 }
 .switch:checked::after { transform: translateX(19px) !important; }
 
@@ -4894,7 +4692,8 @@ input[type="range"]:active::-webkit-slider-thumb { transform: scale(.96); }
   color: #101216 !important;
   box-shadow: 0 18px 44px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .95) !important;
 }
-.full-quality, .full-back, .lyrics-head {
+.full-quality,
+.full-back {
   border-radius: 999px !important;
 }
 .full-quality {
@@ -4951,7 +4750,8 @@ input[type="range"]:active::-webkit-slider-thumb { transform: scale(.96); }
   -webkit-backdrop-filter: blur(46px) saturate(var(--lg-sat)) !important;
   backdrop-filter: blur(46px) saturate(var(--lg-sat)) !important;
 }
-.ol-detail-card, .ol-detail-head, .ol-detail-cover { border-radius: var(--r-lg) !important; }
+.ol-detail-head,
+.ol-detail-cover { border-radius: var(--r-lg) !important; }
 .toast {
   border-radius: 999px !important;
   box-shadow: 0 18px 44px rgba(20, 24, 32, .28), inset 0 1px 0 rgba(255, 255, 255, .16) !important;
@@ -4969,9 +4769,11 @@ button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent-2) 62%, transparent) !important;
+  /* 这里原来是 --accent-2（蓝），而且 !important，把上面那套主色焦点环全压掉了 ——
+     弹窗自动聚焦到关闭按钮时，会看到一个和红橙主色完全不搭的蓝圈。
+     另外 border-radius:999px 会在获得焦点瞬间把矩形按钮掰成胶囊，删掉。 */
+  outline: 2px solid color-mix(in srgb, var(--accent) 58%, transparent) !important;
   outline-offset: 3px;
-  border-radius: 999px;
 }
 @media (prefers-reduced-motion: reduce) {
   .button, .icon-button, .recommend-card, .playlist-card, .album-card, .ol-card, .play-main {
@@ -5171,6 +4973,9 @@ body.dark .page-intro h1 {
 .full-player .full-title-row h2 { color: #fff !important; }
 .full-player .full-title-row p { color: rgba(255, 255, 255, .62) !important; }
 .full-player .full-title-actions .icon-button { color: rgba(255, 255, 255, .9); }
+/* 人声消除开关：开启时亮主色 + 图标换成带斜线的话筒，和右侧红心拉开区分 */
+.full-player .full-title-actions .karaoke-button.active { color: var(--accent); }
+.full-player .full-title-actions .karaoke-button.active .icon { stroke: currentColor; }
 
 /* 音质菜单底部说明贴边，补一点内边距 */
 .qm-menu { padding: 10px 10px 12px !important; }
@@ -5508,6 +5313,150 @@ html body .full-player.lyric-light .icon-button.full-back {
 }
 html body .full-player.lyric-light .icon-button.full-back:hover { color: #17181b !important; }
 
+/* ── 13.3b 歌词页右上角：全屏 + 窗口三键（—、□、✕）──
+   歌词页是 fixed inset:0 的全覆盖层（z-index 80），把 z-index 60 的自绘标题栏
+   整块压在下面，窗口三键看着就「消失」了。所以歌词页自己带一套：
+   顺序与真窗口一致 —— 全屏在最左，右边依次是最小化 / 最大化 / 关闭；
+   尺寸统一 36×36 圆形（和播放条那颗全屏按钮同规格），图标 14px / 1.7 笔画
+   （和主界面标题栏三键同一套线条）。深色歌词用白，浅色歌词自动转黑。 */
+html body .lyrics-topbar {
+  /* .full-player > * 有一条 position: relative，必须显式改回 absolute */
+  position: absolute !important;
+  top: 10px !important;
+  left: auto !important;
+  right: 12px !important;
+  /* .drag-strip 的 z-index 是 7、盖住整个顶部，这里必须抬到 9 才点得到 */
+  z-index: 9 !important;
+  display: flex !important;
+  align-items: center !important;
+  /* 和主界面标题栏三键同一个间距，整排看起来是「一排 caption 按钮」 */
+  gap: 2px !important;
+  -webkit-app-region: no-drag !important;
+  app-region: no-drag !important;
+}
+html body .full-player .icon-button.full-screen-btn {
+  position: static !important;
+  z-index: auto !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  width: 36px !important;
+  height: 36px !important;
+  min-height: 36px !important;
+  padding: 0 !important;
+  border-radius: 50% !important;
+  background: none !important;
+  background-image: none !important;
+  border: 0 !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  color: rgba(255, 255, 255, .82) !important;
+  filter: none !important;
+  -webkit-app-region: no-drag !important;
+  app-region: no-drag !important;
+  transition: background .14s ease, color .14s ease, transform .14s ease !important;
+}
+html body .full-player .icon-button.full-screen-btn::before,
+html body .full-player .icon-button.full-screen-btn::after {
+  content: none !important;
+  display: none !important;
+}
+html body .full-player .icon-button.full-screen-btn:hover,
+html body .full-player .icon-button.full-screen-btn:focus-visible {
+  /* 和主界面那颗一样：hover 浮出一圈淡淡底色（深底用白，浅底用黑，见下） */
+  background: rgba(255, 255, 255, .13) !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  color: #fff !important;
+  filter: none !important;
+}
+html body .full-player .icon-button.full-screen-btn:active {
+  background: rgba(255, 255, 255, .18) !important;
+  transform: scale(.94) !important;
+  color: #fff !important;
+}
+html body .full-player .icon-button.full-screen-btn .icon {
+  /* 跟旁边三键同一套线条：14px 容器、1.7 笔画。
+     全屏路径只画到 4.2~19.8（约 viewBox 的 65%），同样 14px 会显得比横线小一圈，
+     所以给 15px —— 可见方框约 9.8px，和横线 / 方框 / 叉的 10px 齐平。 */
+  width: 15px !important;
+  height: 15px !important;
+  stroke-width: 1.7 !important;
+}
+
+/* 三键本体：和全屏按钮同尺寸同圆底，图标细一档（窗口按钮惯例） */
+html body .lyrics-window-btn {
+  display: grid !important;
+  place-items: center !important;
+  width: 36px !important;
+  height: 36px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: none !important;
+  outline: 0 !important;
+  color: rgba(255, 255, 255, .7) !important;
+  cursor: pointer !important;
+  -webkit-app-region: no-drag !important;
+  app-region: no-drag !important;
+  transition: background .14s ease, color .14s ease, transform .14s ease !important;
+}
+html body .lyrics-window-btn .icon {
+  width: 14px !important;
+  height: 14px !important;
+  stroke-width: 1.7 !important;
+}
+html body .lyrics-window-btn:hover {
+  background: rgba(255, 255, 255, .13) !important;
+  color: #fff !important;
+}
+html body .lyrics-window-btn:active {
+  background: rgba(255, 255, 255, .18) !important;
+  transform: scale(.94) !important;
+}
+html body .lyrics-window-btn:focus-visible {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .4) !important;
+}
+/* 关闭键：极淡红晕，别整块鲜红（和主界面标题栏那颗一致） */
+html body .lyrics-window-btn.is-close:hover {
+  background: rgba(232, 84, 76, .22) !important;
+  color: #ff9b93 !important;
+}
+html body .lyrics-window-btn.is-close:active { background: rgba(232, 84, 76, .3) !important; }
+
+/* 浅色歌词：跟整页一起转黑 */
+html body .full-player.lyric-light .icon-button.full-screen-btn { color: rgba(23, 24, 27, .68) !important; }
+html body .full-player.lyric-light .icon-button.full-screen-btn:hover {
+  background: rgba(0, 0, 0, .07) !important;
+  color: #17181b !important;
+}
+html body .full-player.lyric-light .lyrics-window-btn { color: rgba(23, 24, 27, .58) !important; }
+html body .full-player.lyric-light .lyrics-window-btn:hover {
+  background: rgba(0, 0, 0, .07) !important;
+  color: #17181b !important;
+}
+html body .full-player.lyric-light .lyrics-window-btn.is-close:hover {
+  background: rgba(214, 62, 56, .14) !important;
+  color: #c33a33 !important;
+}
+
+/* 窗口全屏（真全屏，不是「全屏播放页」）：收掉自绘标题栏，让内容顶到屏幕四边。
+   --titlebar-h 是全局变量，body 上覆盖后 .main-content / 滚动条 / 侧栏定位全部跟着归零。 */
+/* 系统 caption 按钮（最小化/最大化/关闭）占的宽度：
+   WCO 提供 env(titlebar-area-*)，拿不到时退回 100% 缩放下的 136px */
+:root {
+  --caption-w: max(136px, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
+}
+body.is-fullscreen { --titlebar-h: 0px; --caption-w: 0px; }
+body.is-fullscreen .titlebar { display: none; }
+
+/* 全屏时主界面右上角**不放**任何按钮：一是两个页面状态不一致（歌词页有、主界面没有同一颗），
+   二是那颗浮球压在封面上很脏。退出全屏的入口统一成三个：
+   F11 / Esc / 双击窗口顶部边框（见 app.js 里的 FULLSCREEN_EDGE_H）。 */
+
 /* ── 13.4 按钮悬停：统一成「透过去的玻璃」 ──────────────────────────────
    半透明白 + backdrop blur + 内高光边。选择器前面挂 html body 是为了压过
    前面各层 `.button.glass:hover`、`.icon-button:hover` 这些同属性 !important。 */
@@ -5552,8 +5501,10 @@ body.dark .sidebar .storage-card:hover {
   background: rgba(255, 255, 255, .1) !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12) !important;
 }
-/* 全屏歌词页是深底的，白玻璃要压到很低，否则一下亮一块 */
-html body .full-player .icon-button:not(.full-back):hover {
+/* 全屏歌词页是深底的，白玻璃要压到很低，否则一下亮一块。
+   ⚠️ 必须排除 .full-screen-btn：它要跟系统 caption 按钮一个观感，hover 只提亮图标，
+   这里一旦命中就会在右上角糊出一块 15% 白方块（就是「变回窗口按钮有白色背景」那个 bug）。 */
+html body .full-player .icon-button:not(.full-back):not(.full-screen-btn):hover {
   background: rgba(255, 255, 255, .15) !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2) !important;
 }
@@ -5586,7 +5537,7 @@ body.dark .sidebar::before {
 /* ── 14.1 顶栏：透明、无模糊、无阴影，只当拖拽区 + 文字层 ────────────── */
 html body .titlebar {
   height: var(--titlebar-h, 46px) !important;
-  padding: 0 150px 0 20px !important;
+  padding: 0 6px 0 20px !important;
   border: 0 !important;
   background: transparent !important;
   -webkit-backdrop-filter: none !important;
@@ -5619,6 +5570,11 @@ html body .titlebar-page {
   font-size: 12.5px;
   font-weight: 520;
   color: color-mix(in srgb, var(--ink) 46%, transparent);
+  /* 原来只有 nowrap，没有宽度上限：歌单名很长时它一路往右铺，
+     直接压到窗口控制按钮上。 */
+  max-width: min(30vw, 300px);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 html body.dark .titlebar-brand span { color: rgba(255, 255, 255, .72) !important; }
 html body.dark .titlebar-divider { background: rgba(255, 255, 255, .16); }
@@ -5715,7 +5671,6 @@ html body .ol-account-copy .ol-badge {
 html body .ol-account-copy strong { display: flex; align-items: center; gap: 0; }
 
 /* 歌单页：标题里已经带了数量，工具栏那一行只留按钮，避免两个「歌单」摞在一起 */
-.section-header.actions-only { justify-content: flex-end; margin-bottom: 14px; }
 .page-intro h1 .section-count { font-size: 13px; font-weight: 500; vertical-align: 2px; }
 
 /* ==========================================================================
@@ -5825,9 +5780,11 @@ body.dark .pl-hero-fallback {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: 38px;
-  line-height: 1.08;
-  letter-spacing: -.03em;
+  /* 固定 38px 时，长歌单名折两行会把整块 hero 顶高 80px，下面列表被推下去；
+     改成随视口收缩，长标题最多两行且高度可控。 */
+  font-size: clamp(22px, 2.5vw, 32px);
+  line-height: 1.1;
+  letter-spacing: -.02em;
   word-break: break-word;
 }
 .pl-meta {
@@ -5950,7 +5907,10 @@ body.dark .pl-hero-fallback {
   padding: 0 6px;
   border: 1px solid currentColor;
   border-radius: 5px;
-  color: var(--green);
+  /* 和歌曲列表的 .track-format 保持同一套语义：
+     有损 = 中性灰、无损 = 金色、在线 = 蓝色。
+     之前这里是「有损绿 / 无损金」，和歌曲页正好相反，同一首歌两个页面两种颜色。 */
+  color: var(--muted);
   font-size: 9px;
   font-weight: 800;
   line-height: 15px;
@@ -6344,7 +6304,7 @@ html body .pl-row.is-playing:hover .pl-row-index > .eq-bars { display: none; }
 .switch::after { transition: transform .3s cubic-bezier(.34, 1.56, .64, 1), width .16s ease; }
 .switch:active::after { width: 21px; }
 .switch:checked:active::after { transform: translateX(16px); }
-.switch:checked { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 60%, transparent); }
+.switch:checked { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); }
 
 /* ── 16.9 Toast：胶囊玻璃条 ─────────────────────────────────────────── */
 .toast {
@@ -6600,17 +6560,24 @@ html body .full-player .bar-range input::-webkit-slider-runnable-track {
    把十段 EQ 挤成一团。这里用更高优先级的选择器恢复为正常竖排滑块。
    ========================================================================== */
 html body .eq-band input[type="range"] {
-  width: 28px !important;
+  width: 22px !important;
   height: 120px !important;
   border-radius: 6px !important;
-  background-color: transparent !important;
-  background-image: linear-gradient(
-    to bottom,
-    var(--accent) 0%,
-    var(--accent) 50%,
-    var(--surface-3) 50%,
-    var(--surface-3) 100%
-  ) !important;
+  background-color: var(--surface-3) !important;
+  /* 填充从中线（0 dB）向两侧生长 —— 原先这里写死「上 50% 恒定染红」，
+     十段全 0 时整根上半截都是红的，看起来像每段都推到了 +12 dB。
+     现在由 JS 写 --eq-up / --eq-down（各 0%~50%），0 dB 时整根纯灰。 */
+  background-image:
+    linear-gradient(to top,
+      transparent 50%,
+      var(--accent) 50%,
+      var(--accent) calc(50% + var(--eq-up, 0%)),
+      transparent calc(50% + var(--eq-up, 0%))),
+    linear-gradient(to bottom,
+      transparent 50%,
+      var(--accent) 50%,
+      var(--accent) calc(50% + var(--eq-down, 0%)),
+      transparent calc(50% + var(--eq-down, 0%))) !important;
   box-shadow: inset 0 0 0 1px var(--glass-line) !important;
   -webkit-appearance: none !important;
   appearance: none !important;
@@ -6625,7 +6592,7 @@ html body .eq-band input[type="range"]::-webkit-slider-runnable-track {
   box-shadow: none !important;
 }
 html body .eq-band input[type="range"]::-webkit-slider-thumb {
-  width: 28px !important;
+  width: 22px !important;
   height: 10px !important;
   border: 0 !important;
   border-radius: 5px !important;
@@ -6689,11 +6656,15 @@ html body .settings-nav::-webkit-scrollbar { width: 0; height: 0; }
 html body .settings-nav-group { display: flex; flex-direction: column; gap: 1px; }
 html body .settings-nav-label {
   padding: 0 10px 5px;
-  color: var(--muted);
+  /* 11px 小字配 --muted(#86868b) 在浅色渐变背景上对比度只有 3.4:1，
+     分组标题几乎看不清。压深到 ink 的 68%。 */
+  color: color-mix(in srgb, var(--ink) 68%, transparent);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: .5px;
 }
+body.dark .settings-nav-label,
+html body.dark .settings-nav-label { color: rgba(255, 255, 255, .56); }
 
 html body .settings-nav-item {
   display: flex;
@@ -7438,3 +7409,263 @@ html body .section-actions {
 }
 html body .section-actions .text-button { white-space: nowrap; }
 html body #recommendAll[hidden] { display: none !important; }
+
+/* ==========================================================================
+   资料库：专辑 / 艺术家视图
+   ========================================================================== */
+.library-switch { margin: 2px 0 16px; }
+.chip-count { margin-left: 6px; font-variant-numeric: tabular-nums; opacity: .62; }
+
+.album-cover { position: relative; display: block; background: var(--surface-2); }
+.album-cover img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+.album-cover-fallback {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  background: linear-gradient(145deg, var(--surface-2), var(--surface));
+  color: var(--muted);
+}
+.album-cover-fallback .icon { width: 34px; height: 34px; }
+.album-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.album-card .playlist-info strong { font-size: 14px; }
+
+/* 均衡器「我的预设」按钮组 */
+.eq-preset-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.button.secondary.is-danger { color: #c0392b; border-color: color-mix(in srgb, #c0392b 26%, var(--line)); }
+.button.secondary.is-danger:hover { background: color-mix(in srgb, #c0392b 8%, var(--surface)); }
+
+/* 通用输入弹窗的说明文字 */
+.modal-sub { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+
+/* 专辑详情：隐掉重复的「专辑」列，列宽换成 5 列以保持对齐 */
+#collectionPage.is-album .pl-head,
+#collectionPage.is-album .pl-row { grid-template-columns: 38px minmax(0, 1fr) 62px 58px 132px; }
+#collectionPage.is-album .pl-head span:nth-child(3),
+#collectionPage.is-album .pl-row-album { display: none; }
+
+/* ==========================================================================
+   自绘窗口按钮（frame:false）
+   系统 overlay 的关闭键悬停时是整块鲜红，改不了颜色；这里换成应用自己的
+   柔和灰，关闭只给一点极淡的红晕，不再抢画面。
+   ========================================================================== */
+.titlebar { justify-content: flex-start; }
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.window-btn {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: color-mix(in srgb, var(--ink) 62%, transparent);
+  cursor: pointer;
+  transition: background .16s ease, color .16s ease;
+}
+.window-btn .icon { width: 14px; height: 14px; stroke-width: 1.7; }
+
+.window-btn:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
+.window-btn:active { background: color-mix(in srgb, var(--ink) 12%, transparent); }
+.window-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* 关闭：极淡红晕 + 偏深红图标，避免整块鲜红 */
+.window-btn.is-close:hover {
+  background: rgba(214, 62, 56, .13);
+  color: #c33a33;
+}
+.window-btn.is-close:active { background: rgba(214, 62, 56, .2); }
+
+body.dark .window-btn { color: rgba(255, 255, 255, .66); }
+body.dark .window-btn:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+body.dark .window-btn.is-close:hover { background: rgba(232, 84, 76, .2); color: #ff9b93; }
+body.dark .window-btn.is-close:active { background: rgba(232, 84, 76, .28); }
+
+/* 最大化后窗口铺满，按钮跟着往边上收一点 */
+body.is-maximized .window-controls { margin-right: -2px; }
+
+/* 深色歌词页：标题栏压在深色底上，自绘按钮转浅 */
+body.tone-full .window-btn { color: rgba(255, 255, 255, .68); }
+body.tone-full .window-btn:hover { background: rgba(255, 255, 255, .12); color: #fff; }
+body.tone-full .window-btn.is-close:hover { background: rgba(232, 84, 76, .2); color: #ff9b93; }
+
+/* ==========================================================================
+   设置页：卡片之间给足呼吸，别再糊成一坨
+   ========================================================================== */
+html body .settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-section {
+  padding: 26px 26px 24px !important;
+}
+.settings-section .section-header { margin-bottom: 22px; }
+.settings-section .section-header h2 { margin-bottom: 6px; }
+.settings-section .settings-list { margin-top: 2px; }
+
+/* 卡片内部的二级分组：标题离上一块留白，别贴着 */
+.settings-group-label {
+  padding: 20px 18px 9px;
+}
+.settings-group-label + .setting-row { border-top: 0; }
+
+/* 均衡器卡片：预设 / 耳机校正 / 滑块三段之间放松一点 */
+#set-eq .setting-row { padding-top: 16px; padding-bottom: 16px; }
+#set-eq .eq-band-wrap,
+#set-eq #eqBands { margin-top: 4px; }
+
+/* 播放条上的迷你播放器开关：打开时点亮，和其他按钮区分开 */
+#miniPlayerButton.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+#miniPlayerButton.active:hover { background: color-mix(in srgb, var(--accent) 19%, transparent); }
+
+/* ==========================================================================
+   播放条：进度条 / 音量条重做
+   ──────────────────────────────────────────────────────────────────────────
+   旧版是两个毛病：
+   ① 轨道 6px + 内阴影 + 16px 白色实心球常显，整条又粗又重；
+   ② 音量条被套了一层玻璃胶囊（border + padding + 底色），深色滑块塞在
+      胶囊里，右边那一撮工具挤成一团。
+   新版：视觉只有 3px 细轨，填充段用 --ink 半透明（深浅主题自动跟）；
+   手柄静止时隐去、鼠标进到这一行才浮出一颗小球；音量胶囊整个拆掉。
+   注意：视觉高度压到 3px 后，input 本体撑到 15px 保证还能按住拖 ——
+   轨道画在 ::-webkit-slider-runnable-track 上，不跟着变粗。
+   ========================================================================== */
+
+html body .volume-control {
+  background: none !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  gap: 8px !important;
+}
+html body .volume-control input { width: 88px !important; }
+
+html body .mini-player #seekSlider,
+html body .mini-player #volumeSlider {
+  /* 用 --ink 而不是 currentColor：seek-row 自己把 color 设成了 --bar-muted，
+     currentColor 会把填充段冲淡成几乎看不见的浅灰 */
+  --range-fill: color-mix(in srgb, var(--ink) 62%, transparent);
+  --range-track: color-mix(in srgb, var(--ink) 11%, transparent);
+  height: 15px !important;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  transition: none !important;
+}
+
+/* 3px 的细轨只画在轨道伪元素上，input 本体的高度留给拖拽命中区。
+   填充终点必须落在「手柄圆心」上：手柄圆心 = 半个手柄宽 + ratio ×（轨道宽 - 手柄宽），
+   直接用 ratio × 轨道宽 会差半个手柄宽（越接近两端越明显）。 */
+html body .mini-player #seekSlider::-webkit-slider-runnable-track,
+html body .mini-player #volumeSlider::-webkit-slider-runnable-track {
+  height: 3px !important;
+  border-radius: 999px !important;
+  background-image: linear-gradient(
+    90deg,
+    var(--range-fill) 0 calc((100% - 9px) * var(--range-ratio, 0) + 4.5px),
+    var(--range-track) calc((100% - 9px) * var(--range-ratio, 0) + 4.5px) 100%
+  ) !important;
+}
+
+/* 静止时不显示手柄，靠填充段的位置读进度；鼠标进到这一行 / 拖动才浮出小球。
+   球只有 9px（原来 11px 挂在 88px 的音量条上像颗大黑豆），
+   margin-top 把它压回 3px 轨道的垂直中线上（不加会挂在线的下方）。 */
+html body .mini-player #seekSlider::-webkit-slider-thumb,
+html body .mini-player #volumeSlider::-webkit-slider-thumb {
+  width: 9px !important;
+  height: 9px !important;
+  margin-top: -3px !important;
+  border: 0 !important;
+  border-radius: 50% !important;
+  /* 静止时透明不可见（opacity 在原生 thumb 上不一定生效，用透明背景更稳），
+     鼠标进到这一行再上色 */
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: scale(.5) !important;
+  transition: background-color .16s ease, box-shadow .16s ease,
+              transform .18s cubic-bezier(.34, 1.56, .64, 1) !important;
+}
+html body .mini-player .seek-row:hover #seekSlider::-webkit-slider-thumb,
+html body .mini-player .volume-control:hover #volumeSlider::-webkit-slider-thumb,
+html body .mini-player #seekSlider:focus-visible::-webkit-slider-thumb,
+html body .mini-player #volumeSlider:focus-visible::-webkit-slider-thumb {
+  background: var(--ink) !important;
+  box-shadow: 0 1px 2px rgba(24, 28, 38, .18) !important;
+  transform: scale(1) !important;
+}
+html body .mini-player #seekSlider:active::-webkit-slider-thumb,
+html body .mini-player #volumeSlider:active::-webkit-slider-thumb {
+  background: var(--ink) !important;
+  box-shadow: 0 1px 3px rgba(24, 28, 38, .24) !important;
+  transform: scale(1.06) !important;
+}
+
+/* seek-row 上和下的留白：别贴着传输键，也别压在时间轴边上 */
+html body .mini-player .seek-row {
+  margin-top: 1px !important;
+  gap: 10px !important;
+}
+html body .mini-player .seek-row span { font-size: 10.5px; letter-spacing: .1px; }
+
+/* ==========================================================================
+   底部播放条：封面 + 歌名整块可点，直接进歌词页（data-action="open-lyrics"）
+   ========================================================================== */
+html body .mini-track-open {
+  display: flex;
+  align-items: center;
+  gap: inherit;              /* 跟着 .mini-track 的间距走，窄屏也不会错位 */
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 10px;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+html body .mini-track-open img {
+  transition: transform .22s cubic-bezier(.34, 1.3, .64, 1),
+              box-shadow .22s ease, filter .22s ease;
+}
+html body .mini-track-open .mini-title strong,
+html body .mini-track-open .mini-title span { transition: color .18s ease; }
+html body .mini-track-open:hover img {
+  transform: scale(1.035);
+  box-shadow: 0 4px 14px -4px rgba(24, 28, 38, .28);
+}
+html body .mini-track-open:hover .mini-title strong { color: var(--ink); }
+html body .mini-track-open:active img { transform: scale(.99); }
+html body .mini-track-open:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 26%, transparent);
+}
+
+/* ==========================================================================
+   播放条：桌面歌词开着时那颗按钮点亮
+   —— 以前开 / 关都没有任何视觉反馈，按钮永远灰着，用户不知道浮窗到底开没开
+   ========================================================================== */
+html body .mini-tools > .icon-button.active {
+  color: var(--ink) !important;
+  background: color-mix(in srgb, var(--ink) 9%, transparent) !important;
+}
+html body .mini-tools > .icon-button.active:hover {
+  background: color-mix(in srgb, var(--ink) 14%, transparent) !important;
+}

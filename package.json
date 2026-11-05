@@ -1,38 +1,48 @@
 {
   "name": "orange-music-desktop",
   "productName": "Orange Music",
-  "version": "1.6.9",
+  "version": "1.8.0",
   "description": "Orange Music 音乐播放器 Windows 桌面版（本地 + 在线）",
   "main": "main.js",
-  "author": "Orange Music",
-  "license": "UNLICENSED",
+  "author": "Andjuzhi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaojuzhi/Orange-Music.git"
+  },
+  "homepage": "https://github.com/xiaojuzhi/Orange-Music#readme",
+  "bugs": {
+    "url": "https://github.com/xiaojuzhi/Orange-Music/issues"
+  },
   "scripts": {
     "start": "electron .",
-    "dist": "set \"ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/\" && set \"ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/\" && electron-builder --win nsis",
-    "dist:dir": "electron-builder --win dir"
+    "dist": "electron-builder --win --x64",
+    "install:local": "node scripts/install-local.js",
+    "dist:install": "npm run dist && npm run install:local",
+    "publish:github": "node scripts/publish.js"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0"
   },
   "devDependencies": {
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8"
   },
   "build": {
-    "appId": "com.orange.music.desktop",
+    "appId": "com.orange.music",
     "productName": "Orange Music",
-    "asar": false,
-    "artifactName": "Orange-Music-Setup-${version}.${ext}",
     "directories": {
       "output": "release"
     },
     "files": [
       "main.js",
       "preload.js",
-      "renderer/**/*",
-      "assets/**/*",
-      "online/**/*",
-      "package.json"
+      "renderer/**",
+      "assets/**",
+      "online/**",
+      "node_modules/**/*"
     ],
     "win": {
-      "icon": "assets/app.ico",
       "target": [
         {
           "target": "nsis",
@@ -40,18 +50,12 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "icon": "assets/app.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Orange Music"
-    },
-    "electronDist": "node_modules/electron/dist"
-  },
-  "dependencies": {
-    "@ffmpeg-installer/ffmpeg": "^1.1.0"
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

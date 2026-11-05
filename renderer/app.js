@@ -90,13 +90,25 @@ const defaultPrefs = {
   sleepTimer: 0,
   replayGain: true,
   eqEnabled: false,
+  // 人声消除（伴奏模式）：左右相减去掉居中人声，见 ensureAudioGraph 里的 karaoke 节点
+  karaoke: false,
   eqPreset: 'flat',
   // 与 EQ_BANDS 一一对应的 10 段增益（旧版这里只写了 5 项，是均衡器的一个 bug，详见 normalizedEqGains）
   eqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  // 耳机校正：AUTOEQ_MODELS 里的型号 id（空串 = 没启用）；
+  // eqPreamp 是这条曲线配套的预增益（dB），避免校正后低频抬升的地方削波
+  eqHeadphone: '',
+  eqPreamp: 0,
   // 用户点「保存当前设置」存下来的自定义均衡（与 EQ_BANDS 等长）。
   // 和 eqGains 分开存：eqGains 是"当前正在用的"，eqCustom 是"存档"，
   // 这样切到别的预设再切回来，用户自己存的那套不会被冲掉。
   eqCustom: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  // 用户自己命名保存的均衡预设：[{ id, name, gains[10], preamp }]，见保存/导入导出小节
+  eqPresets: [],
+  // 本地歌没有内嵌歌词、也没有同名 .lrc 时，去 LRCLIB 查一次（免费、无 key）
+  lrclib: true,
+  // 音频输出设备 deviceId；空串 = 跟随系统默认（系统切换设备时会自动跟过去）
+  outputDevice: '',
   lyricOffset: 0,
   lyricBlur: 0,
   lyricTheme: 'cover',
@@ -172,7 +184,8 @@ const DEFAULT_SHORTCUTS = {
   queue: 'Q',
   shuffle: 'S',
   repeat: 'R',
-  search: 'Ctrl+K'
+  search: 'Ctrl+K',
+  fullscreen: 'F11'
 };
 
 // 10 段均衡（ISO 标准频点）
@@ -233,6 +246,8 @@ const state = {
   progress: readStoredObject('orange-progress'),
   prefs: { ...defaultPrefs, ...readStoredObject('orange-prefs') },
   recommendationOffset: 0,
+  // 专辑 / 艺术家详情页当前看的是哪一组：{ kind: 'album'|'artist', key }
+  collection: null,
   pendingAddId: null,
   pendingAddIds: [],
   selectMode: false,
@@ -266,7 +281,15 @@ let analyser = null;
 let ambientAnalyser = null;
 let sourceNode = null;
 let eqFilters = [];
+// 耳机校正的预增益（AutoEq 的 Preamp）：单开一个增益节点，而不是折进 gainNode，
+// 因为 gainNode 已经被 ReplayGain 占用了，两者混在一起会互相覆盖
+let preampNode = null;
 let gainNode = null;
+// 人声消除（伴奏模式）节点：干声 / 湿声两条支路 + 单声道探测分析器
+let karaokeDry = null;
+let karaokeWet = null;
+let karaokeProbeL = null;
+let karaokeProbeR = null;
 let fadeTimer = null;
 let pendingResume = 0;
 // 切歌请求序号：只允许最后一次 playTrack 的结果落到 audio 上，避免异步解析音源时被旧请求覆盖
@@ -276,6 +299,192 @@ let playRequestToken = 0;
 let bootResumeId = null;
 let bootResumeUsed = false;
 let lastProgressSave = 0;
+
+/* ------------------- Windows SMTC / 系统媒体控制 -------------------
+ * Electron 在 Windows 上本来就会把 <audio> 的媒体会话发布到 SMTC（锁屏、音量弹窗、
+ * 键盘/耳机线控的媒体键都走这条路）。但如果页面不设 navigator.mediaSession.metadata，
+ * 系统里只有一条 document.title（"index.html"）的空记录：没有封面、没有歌手、按了键也没反应。
+ * 这里把歌曲信息推过去，并把系统的播放控制接回来。
+ * 之所以不用原生模块：实测 Electron 33 已经自带这层发布能力，只差页面这一侧的声明。
+ */
+let smtcLastPositionAt = 0;
+// 媒体键与 SMTC 回调可能同时到达（Chromium 转发一次、页面 keydown 再收一次），
+// 切歌类动作必须去重，否则按一下跳两首
+let lastMediaSkipAt = 0;
+// 已经推给系统的曲目指纹（id + 封面），避免每次 updatePlayerUi 都重建一遍封面
+let smtcTrackKey = '';
+// 封面转码是异步的，切歌快时旧结果会晚到，用序号丢弃过期的那次
+let smtcArtworkToken = 0;
+
+function smtcSupported() {
+  return typeof navigator !== 'undefined' && 'mediaSession' in navigator;
+}
+
+/** 相对路径 / file:// / data: 一律转成绝对 URL —— SMTC 拿不到相对路径的封面 */
+function mediaArtworkUrl(source) {
+  if (!source) return '';
+  try {
+    return new URL(source, location.href).href;
+  } catch (error) {
+    return source;
+  }
+}
+
+/**
+ * 把封面压成 256×256 的 data URL。
+ * 为什么不用原始 file:// 地址：这张图是给系统进程去取的，file:// 在浏览器进程里
+ * 不一定读得到；data URL 是随元数据一起带过去的内存图，Chromium 直接解码，稳。
+ *
+ * 本地封面必须先过主进程：页面里 <img> 加载 file:// 后再画到 canvas 会被判成跨源，
+ * toDataURL 直接抛 SecurityError（原来这里 catch 掉返回空串，表现就是「系统媒体面板
+ * 永远没有封面」）。主进程用 nativeImage 读同一个文件不受同源限制。
+ * 在线封面是 http(s) 且带 CORS 头，canvas 那条路走得通。
+ */
+function buildArtworkDataUrl(cover) {
+  const raw = typeof cover === 'string' ? cover : '';
+  const local = raw && (/^file:/i.test(raw) || /^[a-zA-Z]:[\\/]/.test(raw));
+  const viaMain = local && window.orangeDesktop?.coverDataUrl
+    ? window.orangeDesktop.coverDataUrl(raw, 256).catch(() => '')
+    : Promise.resolve('');
+  return viaMain.then(data => data || canvasArtworkDataUrl(raw));
+}
+
+function canvasArtworkDataUrl(cover) {
+  return new Promise(resolve => {
+    const url = mediaArtworkUrl(hiResCover(cover));
+    if (!url) return resolve('');
+    const image = new Image();
+    // 本地 file:// 加 crossOrigin 反而会被 CORS 挡掉（和播放器里 <img> 的处理一致）
+    if (/^https?:/i.test(url)) image.crossOrigin = 'anonymous';
+    const timer = setTimeout(() => resolve(''), 2500);
+    image.onload = () => {
+      clearTimeout(timer);
+      try {
+        const size = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext('2d');
+        // 方形居中裁剪：非正方形封面直接拉伸会变形
+        const side = Math.min(image.naturalWidth, image.naturalHeight) || size;
+        const sx = Math.max(0, (image.naturalWidth - side) / 2);
+        const sy = Math.max(0, (image.naturalHeight - side) / 2);
+        context.drawImage(image, sx, sy, side, side, 0, 0, size, size);
+        resolve(canvas.toDataURL('image/jpeg', 0.72));
+      } catch (error) {
+        resolve('');
+      }
+    };
+    image.onerror = () => {
+      clearTimeout(timer);
+      resolve('');
+    };
+    image.src = url;
+  });
+}
+
+function smtcMetadata(track, artwork) {
+  return new MediaMetadata({
+    title: track.title || '未知歌曲',
+    artist: track.artist || '未知歌手',
+    album: track.album || '',
+    artwork: artwork || []
+  });
+}
+
+/** 把当前曲目推给系统：标题 / 歌手 / 专辑 / 封面，同时校准播放状态与进度 */
+function syncMediaSession(track = getTrack(state.currentId)) {
+  if (!smtcSupported()) return;
+  const session = navigator.mediaSession;
+  if (!track) {
+    smtcTrackKey = '';
+    session.metadata = null;
+    session.playbackState = 'none';
+    return;
+  }
+  const key = `${track.id}|${track.cover || ''}`;
+  if (key !== smtcTrackKey) {
+    smtcTrackKey = key;
+    const token = ++smtcArtworkToken;
+    // 先把文字信息推上去（立刻可见），封面随后补。
+    // ⚠️ MediaImage 只认 http/https/data/blob —— 本地封面的 file:// 会被 Chromium
+    // 直接拒掉（控制台一句 "MediaImage src can only be of ..."，面板上就是没图），
+    // 所以 file:// 一律先不给，等主进程转好的 data URL 回来再补。
+    const url = mediaArtworkUrl(hiResCover(track.cover));
+    const usableNow = url && !/^file:/i.test(url) && !/^[a-zA-Z]:[\\/]/.test(url);
+    try {
+      session.metadata = smtcMetadata(track, usableNow ? [{ src: url, sizes: '512x512' }] : []);
+    } catch (error) {
+      console.warn('mediaSession metadata failed', error);
+    }
+    buildArtworkDataUrl(track.cover).then(data => {
+      if (!data || token !== smtcArtworkToken) return;
+      if (getTrack(state.currentId)?.id !== track.id) return;
+      try {
+        session.metadata = smtcMetadata(track, [{ src: data, sizes: '256x256', type: 'image/jpeg' }]);
+      } catch (error) {}
+    });
+  }
+  session.playbackState = state.playing ? 'playing' : 'paused';
+  syncMediaPosition(true);
+}
+
+/** 进度条：setPositionState 会被系统用来画锁屏/音量弹窗上的进度，别每秒都推，节流到 8 秒 */
+function syncMediaPosition(force = false) {
+  if (!smtcSupported()) return;
+  const duration = Number(audio.duration);
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  const now = Date.now();
+  if (!force && now - smtcLastPositionAt < 8000) return;
+  smtcLastPositionAt = now;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration,
+      position: Math.min(duration, Math.max(0, Number(audio.currentTime) || 0)),
+      playbackRate: Number(audio.playbackRate) || 1
+    });
+  } catch (error) {
+    // 某些格式 duration 会短暂为 Infinity，抛错就别管，下一轮再说
+  }
+}
+
+/** 切歌去重：媒体键 & SMTC 双通道时一次按键只跳一首 */
+function mediaSkip(direction) {
+  const now = Date.now();
+  if (now - lastMediaSkipAt < 350) return;
+  lastMediaSkipAt = now;
+  if (direction > 0) nextTrack();
+  else previousTrack();
+}
+
+/** 注册系统侧的播放控制。play / pause 做成幂等，重复到达也不会互相抵消 */
+function initMediaSession() {
+  if (!smtcSupported()) return;
+  const session = navigator.mediaSession;
+  const guard = (action, handler) => {
+    try {
+      session.setActionHandler(action, handler);
+    } catch (error) {
+      // 个别动作在旧版 Chromium 上不支持，跳过即可
+    }
+  };
+  guard('play', () => { if (!state.playing) togglePlayback(); });
+  guard('pause', () => { if (state.playing) togglePlayback(); });
+  guard('stop', () => { if (state.playing) togglePlayback(); });
+  guard('previoustrack', () => mediaSkip(-1));
+  guard('nexttrack', () => mediaSkip(1));
+  guard('seekto', details => {
+    const target = Number(details && details.seekTime);
+    if (!Number.isFinite(target) || !Number.isFinite(audio.duration)) return;
+    audio.currentTime = Math.min(audio.duration, Math.max(0, target));
+    updateProgress();
+    syncMediaPosition(true);
+  });
+  guard('seekbackward', details => seekBy(-(Number(details && details.seekOffset) || 10)));
+  guard('seekforward', details => seekBy(Number(details && details.seekOffset) || 10));
+  syncMediaSession();
+}
+
 let sleepTimerId = null;
 let sleepAtTrackEnd = false;
 let sleepEndsAt = 0;
@@ -480,9 +689,40 @@ async function loadSidecarLyrics(track) {
   return lyrics;
 }
 
+/* 歌词缓存上限。
+   歌词按需加载后就挂在曲目对象上（track._lyrics），以前是只增不减：
+   一个几千首的库连着听下来，每首几十 KB 的歌词对象会一直占着内存。
+   这里按「最近播放」维持一个上限，超出的淘汰掉（下次播放会重新读盘）。
+   正在播放的那首永远不淘汰；_lyricChecked 不动，所以不会退化成反复查"有没有歌词"。 */
+const LYRIC_CACHE_LIMIT = 16;
+const lyricCacheOrder = [];
+
+function touchLyricCache(track) {
+  if (!track || !track.id) return;
+  const at = lyricCacheOrder.indexOf(track.id);
+  if (at >= 0) lyricCacheOrder.splice(at, 1);
+  lyricCacheOrder.push(track.id);
+  // guard 防死循环：极端情况下（队列全是当前曲目）不会卡住
+  let guard = lyricCacheOrder.length;
+  while (lyricCacheOrder.length > LYRIC_CACHE_LIMIT && guard-- > 0) {
+    const staleId = lyricCacheOrder.shift();
+    // 正在播放的和正在加载的都不淘汰（切歌瞬间 state.currentId 可能还没跟上）
+    if (staleId === state.currentId || staleId === track.id) {
+      lyricCacheOrder.push(staleId);
+      continue;
+    }
+    const stale = getTrack(staleId);
+    if (stale) {
+      stale._lyrics = null;
+      stale._lyricsView = null;
+    }
+  }
+}
+
 // 读取歌词：内嵌标签优先，其次同名 lrc（重启后也能重新读到内嵌歌词）
 async function loadTrackLyrics(track) {
   if (!track) return [];
+  touchLyricCache(track);
   if (track._lyrics?.length) return track._lyrics;
   if (window.orangeDesktop?.readLyrics && track._path) {
     const result = await window.orangeDesktop.readLyrics(track._path).catch(() => null);
@@ -495,7 +735,41 @@ async function loadTrackLyrics(track) {
       return result.lyrics;
     }
   }
-  return loadSidecarLyrics(track);
+  // 同目录 .lrc 优先于在线库：用户手动放的歌词一定是他要的版本
+  const sidecar = await loadSidecarLyrics(track);
+  if (sidecar.length) return sidecar;
+  return loadLrclibLyrics(track);
+}
+
+/**
+ * LRCLIB 在线补词（300 万首，免费无 key）。
+ * 本地歌经常既没有内嵌歌词也没有同名 .lrc，以前这种歌永远停在「暂无歌词」；
+ * 现在按歌名 + 歌手 + 时长去查一次，命中就当作歌词源，界面上的来源标注为 LRCLIB。
+ * 每首歌只查一次（_lyrclibTried），没查到也不会每次播放都再请求一遍。
+ */
+async function loadLrclibLyrics(track) {
+  if (!track || state.prefs.lrclib === false) return [];
+  if (!window.orangeDesktop?.lrclibLyrics) return [];
+  if (track._lyrclibTried) return [];
+  track._lyrclibTried = true;
+  const result = await window.orangeDesktop.lrclibLyrics({
+    title: track.title || '',
+    artist: track.artist || '',
+    album: track.album || '',
+    duration: Number(track.duration) || 0
+  }).catch(() => null);
+  if (!result) return [];
+  const text = result.synced || result.plain || '';
+  if (!text) return [];
+  const lyrics = parseLyrics(text);
+  if (!lyrics.length) return [];
+  track._lyrics = lyrics;
+  track._lyricSource = result.synced ? 'lrclib' : 'lrclib-plain';
+  track._lyricPath = '';
+  track._lyricManual = false;
+  track._lyricText = '';
+  track._lyricProvider = [result.artistName, result.trackName].filter(Boolean).join(' · ');
+  return lyrics;
 }
 
 function formatTime(seconds) {
@@ -632,6 +906,51 @@ function showToast(message) {
   toastTimer = setTimeout(() => toast.classList.remove('show'), 2600);
 }
 
+/**
+ * 输入一行文字的弹窗。Electron 里 window.prompt 是直接抛错的，所以用 <dialog> 自己做一个。
+ * 返回 Promise<string|null>：确定返回去掉首尾空格的文本，取消 / 关闭返回 null。
+ */
+function askText({ title = '请输入', hint = '', value = '' } = {}) {
+  const dialogEl = $('#promptModal');
+  const form = $('#promptForm');
+  const input = $('#promptInput');
+  if (!dialogEl || !form || !input) return Promise.resolve(null);
+  const titleEl = $('#promptTitle');
+  const hintEl = $('#promptHint');
+  if (titleEl) titleEl.textContent = title;
+  if (hintEl) {
+    hintEl.textContent = hint;
+    hintEl.hidden = !hint;
+  }
+  input.value = value;
+  dialogEl.showModal();
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      form.removeEventListener('submit', onSubmit);
+      dialogEl.removeEventListener('close', onClose);
+      if (dialogEl.open) dialogEl.close();
+      resolve(result);
+    };
+    const onSubmit = event => {
+      event.preventDefault();
+      const text = input.value.trim();
+      if (!text) {
+        input.focus();
+        return;
+      }
+      finish(text);
+    };
+    const onClose = () => finish(null);
+    form.addEventListener('submit', onSubmit);
+    dialogEl.addEventListener('close', onClose);
+  });
+}
+
 function trackRowHtml(track, index) {
   const favorite = state.favorites.has(track.id);
   const isCurrent = state.currentId === track.id;
@@ -647,7 +966,7 @@ function trackRowHtml(track, index) {
         </button>
       </div>
       <div class="track-main">
-        <img src="${track.cover}" alt="" />
+        <img src="${track.cover || DEFAULT_COVER}" alt="" />
         <div><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)} · ${escapeHtml(track.album)}</span></div>
       </div>
       <div class="track-album">${escapeHtml(track.album)}</div>
@@ -692,7 +1011,7 @@ function cardHtml(track) {
   return `
     <article class="recommend-card" data-track-card="${track.id}" tabindex="0">
       <div class="recommend-cover">
-        <img src="${track.cover}" alt="${escapeHtml(track.album)} 封面" />
+        <img src="${track.cover || DEFAULT_COVER}" alt="${escapeHtml(track.album)} 封面" />
         <button class="card-play" data-play="${track.id}" aria-label="播放 ${escapeHtml(track.title)}">
           <svg class="icon"><use href="#i-play"/></svg>
         </button>
@@ -836,8 +1155,10 @@ function playlistHue(playlist) {
   const text = String(playlist?.name || '歌单');
   let sum = 0;
   for (const char of text) sum += char.codePointAt(0);
-  // 乘上黄金角再取模：直接取模的话，名字相近的歌单色相会挤在一起（一片紫粉）
-  return (sum * 137) % 360;
+  // 乘上黄金角再取模：直接取模的话，名字相近的歌单色相会挤在一起（一片紫粉）。
+  // 但取模 360 会跑出绿、青、紫、蓝 —— 歌单页四张卡四种色，和整站的红色主调冲突。
+  // 收敛到红→橙→金（0°~58°）这个区间，既有区分度又不脱节。
+  return (sum * 137) % 58;
 }
 
 function playlistCoverHtml(playlist, overlay = '') {
@@ -961,7 +1282,7 @@ function closePlaylistPage() {
   }
 }
 
-function plRowHtml(track, index) {
+function plRowHtml(track, index, options = {}) {
   const favorite = state.favorites.has(track.id);
   const current = state.currentId === track.id;
   const isOnline = Boolean(track._online);
@@ -1003,9 +1324,9 @@ function plRowHtml(track, index) {
         <button class="icon-button" data-pl-add="${track.id}" title="加到别的歌单" aria-label="加到别的歌单">
           <svg class="icon"><use href="#i-list"/></svg>
         </button>
-        <button class="icon-button danger" data-pl-remove="${track.id}" title="从本歌单移除" aria-label="从本歌单移除">
+        ${options.hideRemove ? '' : `<button class="icon-button danger" data-pl-remove="${track.id}" title="从本歌单移除" aria-label="从本歌单移除">
           <svg class="icon"><use href="#i-x"/></svg>
-        </button>
+        </button>`}
       </div>
     </div>`;
 }
@@ -1154,22 +1475,235 @@ function deletePlaylist(id) {
   showToast(`已删除歌单「${playlist.name}」`);
 }
 
+/* ==========================================================================
+   专辑 / 艺术家视图
+   本地曲库以前只有一张平铺的歌曲表：几千首歌想「听整张专辑」只能靠搜。
+   这里按标签把曲目分组，卡片点进去是详情页（复用歌单详情那套排版）。
+   ========================================================================== */
+
+// 卡片上只放数组下标，点开时从缓存取分组 —— 专辑名里带引号、斜杠也不会把 data 属性弄坏
+let albumGroupsCache = [];
+let artistGroupsCache = [];
+let libraryView = 'playlists';
+
+const UNKNOWN_ALBUM = '未知专辑';
+const UNKNOWN_ARTIST = '未知歌手';
+
+/** 专辑内排序：优先认文件名 / 标题开头的序号（01 - xxx），没有就按标题 */
+function albumTrackOrder(track) {
+  const text = `${track.title || ''} ${(track._path || '').split(/[\\/]/).pop() || ''}`;
+  const match = text.match(/(?:^|\s)(\d{1,3})[\s.\-_]/);
+  return match ? Number(match[1]) : 9999;
+}
+
+function groupSongs(byArtist) {
+  const map = new Map();
+  for (const song of state.songs) {
+    const artist = (song.artist || '').trim() || UNKNOWN_ARTIST;
+    const album = (song.album || '').trim() || UNKNOWN_ALBUM;
+    const name = byArtist ? artist : album;
+    // 同名专辑不同歌手是两张专辑，key 必须带上歌手
+    const key = byArtist ? artist : `${album}\u0000${artist}`;
+    if (!map.has(key)) {
+      map.set(key, { key, name, artist, album, tracks: [] });
+    }
+    map.get(key).tracks.push(song);
+  }
+  const groups = [...map.values()];
+  for (const group of groups) {
+    group.tracks.sort((a, b) => {
+      const diff = albumTrackOrder(a) - albumTrackOrder(b);
+      return diff || String(a.title).localeCompare(String(b.title), 'zh-CN');
+    });
+    // 封面取第一张有真封面的：整张专辑通常是同一张，没有就留空用占位
+    group.cover = group.tracks.find(track => track.cover && track.cover !== DEFAULT_COVER)?.cover || '';
+    group.duration = group.tracks.reduce((sum, track) => sum + (Number(track.duration) || 0), 0);
+    group.format = group.tracks.some(track => lossless(track.format)) ? '无损' : '';
+    if (byArtist) {
+      group.albumCount = new Set(group.tracks.map(track => (track.album || UNKNOWN_ALBUM).trim())).size;
+    }
+  }
+  groups.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  return groups;
+}
+
+function albumCardHtml(group, index, kind) {
+  const sub = kind === 'artist'
+    ? `${group.albumCount} 张专辑 · ${group.tracks.length} 首`
+    : `${group.tracks.length} 首 · ${group.artist}`;
+  return `
+    <article class="album-card" data-album-index="${index}" data-album-kind="${kind}" tabindex="0" role="button"
+      aria-label="打开 ${escapeHtml(group.name)}">
+      <div class="album-cover">
+        ${group.cover
+          ? `<img src="${escapeHtml(group.cover)}" alt="" loading="lazy" />`
+          : `<div class="album-cover-fallback"><svg class="icon"><use href="#i-nav-note"/></svg></div>`}
+        <button class="playlist-play" data-album-play="${index}" data-album-kind="${kind}"
+          aria-label="播放 ${escapeHtml(group.name)}"><svg class="icon"><use href="#i-play"/></svg></button>
+      </div>
+      <div class="playlist-info">
+        <strong>${escapeHtml(group.name)}</strong>
+        <span>${escapeHtml(sub)}</span>
+      </div>
+    </article>`;
+}
+
 function renderAlbums() {
   const target = $('#albumGrid');
   if (!target) return;
-  const map = new Map();
-  state.songs.forEach(song => {
-    if (!map.has(song.album)) map.set(song.album, []);
-    map.get(song.album).push(song);
-  });
-  target.innerHTML = [...map.entries()].map(([album,songs]) => `
-    <article class="album-card" data-track-card="${songs[0].id}" tabindex="0">
-      <img src="${songs[0].cover}" alt="${escapeHtml(album)} 封面" />
-      <button class="playlist-play" data-play="${songs[0].id}" aria-label="播放 ${escapeHtml(album)}">
-        <svg class="icon"><use href="#i-play"/></svg>
-      </button>
-      <div class="playlist-info"><strong>${escapeHtml(album)}</strong><span>${songs.length} 首 · ${escapeHtml(songs[0].artist)}</span></div>
-    </article>`).join('');
+  albumGroupsCache = groupSongs(false);
+  target.innerHTML = albumGroupsCache.length
+    ? albumGroupsCache.map((group, index) => albumCardHtml(group, index, 'album')).join('')
+    : emptyHtml('还没有可归类的专辑', '导入音乐并扫描完成后，这里会按专辑标签自动分组');
+  syncLibraryCounts();
+}
+
+function renderArtists() {
+  const target = $('#artistGrid');
+  if (!target) return;
+  artistGroupsCache = groupSongs(true);
+  target.innerHTML = artistGroupsCache.length
+    ? artistGroupsCache.map((group, index) => albumCardHtml(group, index, 'artist')).join('')
+    : emptyHtml('还没有可归类的歌手', '歌曲的标签里没有歌手信息时，会统一归到「未知歌手」');
+  syncLibraryCounts();
+}
+
+function syncLibraryCounts() {
+  const albumCount = $('#albumCount');
+  const artistCount = $('#artistCount');
+  if (albumCount) {
+    const count = albumGroupsCache.length || groupSongs(false).length;
+    albumCount.textContent = count;
+    albumCount.hidden = !count;
+  }
+  if (artistCount) {
+    const count = artistGroupsCache.length || groupSongs(true).length;
+    artistCount.textContent = count;
+    artistCount.hidden = !count;
+  }
+}
+
+/** 资料库页顶部的「歌单 / 专辑 / 艺术家」切换 */
+function switchLibraryView(view) {
+  libraryView = view;
+  $$('#librarySwitch .chip').forEach(chip => chip.classList.toggle('active', chip.dataset.libraryView === view));
+  $$('#libraryPage .library-panel').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === view));
+  // 页头标题、说明文字跟着视图变，返回时不至于还写着「歌单」
+  const heading = $('#libraryPage .page-intro h1');
+  const labels = { playlists: '歌单', albums: '专辑', artists: '艺术家' };
+  if (heading) {
+    const count = heading.querySelector('.section-count');
+    heading.textContent = labels[view] || '歌单';
+    if (count) heading.appendChild(count);
+  }
+  const subtitle = $('#libraryPage .page-subtitle');
+  if (subtitle) {
+    subtitle.textContent = {
+      playlists: '把本地文件和网络歌曲整理到一起，点开任意歌单查看曲目。',
+      albums: '按专辑标签自动分组，点开任意一张看完整曲目。',
+      artists: '按歌手标签自动分组，点开任意一位看他名下的所有作品。'
+    }[view] || '';
+  }
+  // 「新建歌单」只属于歌单视图，藏在专辑 / 艺术家页只会让人误以为能建专辑
+  const newPlaylist = document.querySelector('#libraryPage [data-action="new-playlist"]');
+  if (newPlaylist) newPlaylist.hidden = view !== 'playlists';
+  if (view === 'albums') renderAlbums();
+  if (view === 'artists') renderArtists();
+}
+
+function collectionGroups(kind) {
+  if (kind === 'artist') {
+    if (!artistGroupsCache.length) artistGroupsCache = groupSongs(true);
+    return artistGroupsCache;
+  }
+  if (!albumGroupsCache.length) albumGroupsCache = groupSongs(false);
+  return albumGroupsCache;
+}
+
+function currentCollection() {
+  const collection = state.collection;
+  if (!collection) return null;
+  const group = collectionGroups(collection.kind).find(item => item.key === collection.key);
+  return group || null;
+}
+
+function openCollectionPage(kind, index) {
+  const group = collectionGroups(kind)[index];
+  if (!group) return;
+  state.collection = { kind, key: group.key };
+  showPage('collection');
+  $('.main-content')?.scrollTo({ top: 0 });
+}
+
+function closeCollectionPage() {
+  state.collection = null;
+  showPage('library');
+}
+
+function playCollection(startId = '', shuffled = false) {
+  const group = currentCollection();
+  if (!group?.tracks.length) return;
+  const ordered = shuffled ? [...group.tracks].sort(() => Math.random() - .5) : group.tracks;
+  state.queue = ordered.map(track => track.id);
+  renderQueue();
+  saveLibrary();
+  const start = startId && state.queue.includes(startId) ? startId : state.queue[0];
+  playTrack(start);
+  showToast(shuffled ? `随机播放「${group.name}」` : `正在播放「${group.name}」`);
+}
+
+function renderCollectionPage() {
+  const hero = $('#colHero');
+  const list = $('#colTrackList');
+  const table = $('#colTable');
+  if (!hero || !list) return;
+  const group = currentCollection();
+  if (!group) {
+    // 曲库变了（删歌 / 重新扫描）之后原来的分组可能已经不存在
+    closeCollectionPage();
+    return;
+  }
+  const kind = state.collection.kind;
+  const cover = group.cover;
+  // 专辑详情里每行再写一遍同名专辑是纯噪音，直接把这一列收掉
+  document.querySelector('#collectionPage')?.classList.toggle('is-album', kind === 'album');
+  const barTitle = $('#colBarTitle');
+  if (barTitle) barTitle.textContent = group.name;
+  const backLabel = $('#colBarBackLabel');
+  if (backLabel) backLabel.textContent = kind === 'artist' ? '艺术家' : '专辑';
+  const titlebarPage = $('#titlebarPage');
+  if (titlebarPage) titlebarPage.textContent = group.name;
+
+  const meta = kind === 'artist'
+    ? [`${group.albumCount} 张专辑`, `${group.tracks.length} 首歌曲`, formatDuration(group.duration)]
+    : [group.artist || UNKNOWN_ARTIST, `${group.tracks.length} 首歌曲`, formatDuration(group.duration)];
+
+  hero.innerHTML = `
+    <div class="pl-hero-cover">
+      ${cover
+        ? `<img src="${escapeHtml(cover)}" alt="" />`
+        : `<div class="pl-hero-fallback" style="--pl-hue:${kind === 'artist' ? 18 : 8}"><svg class="icon"><use href="#i-nav-note"/></svg></div>`}
+    </div>
+    <div class="pl-hero-copy">
+      <p class="pl-eyebrow">${kind === 'artist' ? '艺术家' : '专辑'}</p>
+      <h1>${escapeHtml(group.name)}</h1>
+      <div class="pl-meta">
+        ${meta.map((part, index) => `${index ? '<i></i>' : ''}<span>${escapeHtml(part)}</span>`).join('')}
+      </div>
+      <div class="pl-actions">
+        <button class="button primary" data-col-action="play-all">
+          <svg class="icon filled"><use href="#i-play"/></svg>播放全部
+        </button>
+        <button class="button secondary" data-col-action="shuffle">
+          <svg class="icon"><use href="#i-shuffle"/></svg>随机播放
+        </button>
+      </div>
+    </div>`;
+
+  if (table) table.hidden = !group.tracks.length;
+  list.innerHTML = group.tracks.map((track, index) => plRowHtml(track, index, { hideRemove: true })).join('');
+  const emptyHost = $('#colEmptyHost');
+  if (emptyHost) emptyHost.innerHTML = group.tracks.length ? '' : emptyHtml('这里没有歌曲', '曲库变化后这个分组可能已经空了');
 }
 
 function renderQueue() {
@@ -1182,7 +1716,7 @@ function renderQueue() {
   }
   target.innerHTML = songs.map(song => `
     <div class="queue-row ${song.id === state.currentId ? 'active' : ''}" data-queue-track="${song.id}">
-      <img src="${song.cover}" alt="" />
+      <img src="${song.cover || DEFAULT_COVER}" alt="" />
       <div><strong>${escapeHtml(song.title)}</strong><span>${escapeHtml(song.artist)}</span></div>
       <span>${formatTime(song.duration)}</span>
       <button class="icon-button danger" data-remove="${song.id}" aria-label="从资料库移除" title="从资料库移除"><svg class="icon"><use href="#i-trash"/></svg></button>
@@ -1273,9 +1807,12 @@ function renderAll() {
   renderFavorites();
   renderPlaylists();
   renderAlbums();
+  renderArtists();
   renderQueue();
   renderCounts();
   renderSelectionUi();
+  // 曲库变化（导入 / 删除）后，正在看的专辑详情可能已经空了
+  if (state.page === 'collection') renderCollectionPage();
 }
 
 // ---------- 多选 / 全选 ----------
@@ -1402,7 +1939,10 @@ function refreshTrackRows() {
  * 这里就地改写 URL 参数，取平台能给到的最大尺寸；本地封面（data: / file:）原样返回。
  */
 function hiResCover(url) {
-  if (!url || /^(data|blob|file):/i.test(url)) return url;
+  // 空封面直接给占位图。以前这里返回空串，赋给 <img>.src 会变成破图图标，
+  // 全屏播放页和播放条都会显示一个「碎图」而不是默认封面。
+  if (!url) return DEFAULT_COVER;
+  if (/^(data|blob|file):/i.test(url)) return url;
   return url
     .replace(/([?&]param=)\d+y\d+/i, (_, prefix) => `${prefix}1024y1024`)
     .replace(/T002R\d+x\d+M000/, 'T002R800x800M000');
@@ -1433,9 +1973,11 @@ function updatePlayerUi() {
     $('#fullFavorite').classList.remove('active');
     renderLyrics();
     refreshTrackRows();
+    // 资料库空了 / 没有当前曲目：把系统媒体卡片一并清掉，别在锁屏上留上一首
+    syncMediaSession();
     return;
   }
-  $('#miniCover').src = track.cover;
+  $('#miniCover').src = track.cover || DEFAULT_COVER;
   $('#miniTitle').textContent = track.title;
   $('#miniArtist').textContent = track.artist;
   $('#fullCover').src = hiResCover(track.cover);
@@ -1450,6 +1992,82 @@ function updatePlayerUi() {
   renderLyrics();
   refreshTrackRows();
   pushDesktopLyricsState();
+  // 系统媒体控制（锁屏 / 音量弹窗 / 媒体键）跟着当前曲目走
+  syncMediaSession(track);
+}
+
+/* ----------------------------- 音频输出设备 ----------------------------- */
+
+/**
+ * 切输出设备。
+ * 注意：音频是从 AudioContext 出去的（<audio> 只是音源，已经被 createMediaElementSource 接管），
+ * 所以真正要改的是 audioContext.setSinkId；只改 <audio> 是没声音变化的。
+ * 空串 = 系统默认设备，Windows 切输出时它会自动跟过去。
+ */
+async function applyOutputDevice() {
+  const id = String(state.prefs.outputDevice || '');
+  try {
+    if (audioContext && typeof audioContext.setSinkId === 'function') {
+      await audioContext.setSinkId(id);
+      return true;
+    }
+    if (typeof audio.setSinkId === 'function') {
+      await audio.setSinkId(id);
+      return true;
+    }
+  } catch (error) {
+    // 设备被拔出 / 被别的程序独占时退回默认，别让人以为播放器坏了
+    if (id) {
+      state.prefs.outputDevice = '';
+      savePrefs();
+      const select = $('#outputDevice');
+      if (select) select.value = '';
+      showToast('这个输出设备现在用不了，已切回系统默认');
+      try { await audioContext?.setSinkId?.(''); } catch {}
+    }
+  }
+  return false;
+}
+
+async function refreshOutputDevices() {
+  const select = $('#outputDevice');
+  if (!select) return;
+  const devices = await navigator.mediaDevices?.enumerateDevices?.().catch(() => []) || [];
+  // deviceId 为 "default"/"communications" 的虚拟项在 Chromium 里也会出现，去掉免得列表里三行同名
+  const outputs = devices.filter(item => item.kind === 'audiooutput'
+    && item.deviceId && item.deviceId !== 'default' && item.deviceId !== 'communications');
+  const current = String(state.prefs.outputDevice || '');
+  select.innerHTML = '<option value="">跟随系统默认</option>'
+    + outputs.map((item, index) => `<option value="${escapeHtml(item.deviceId)}">${escapeHtml(item.label || `输出设备 ${index + 1}`)}</option>`).join('');
+  const exists = !current || outputs.some(item => item.deviceId === current);
+  if (!exists) {
+    state.prefs.outputDevice = '';
+    savePrefs();
+  }
+  select.value = exists ? current : '';
+  const hint = $('#outputDeviceHint');
+  if (hint) {
+    hint.textContent = outputs.length
+      ? `已识别 ${outputs.length} 个输出设备；「跟随系统默认」会随 Windows 切换设备自动跟着变`
+      : '没有识别到独立输出设备（插上耳机 / 音箱后会自动出现）';
+  }
+}
+
+function initOutputDevice() {
+  const select = $('#outputDevice');
+  if (!select) return;
+  refreshOutputDevices();
+  select.addEventListener('change', async () => {
+    state.prefs.outputDevice = select.value;
+    savePrefs();
+    const ok = await applyOutputDevice();
+    const label = select.selectedOptions?.[0]?.textContent || '';
+    if (!ok && select.value) return;
+    showToast(select.value ? `已切换到「${label}」` : '已切回系统默认输出');
+  });
+  // 插拔耳机后 deviceId 会变，列表跟着刷新一次
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => refreshOutputDevices());
+  applyOutputDevice();
 }
 
 function ensureAudioGraph() {
@@ -1471,8 +2089,63 @@ function ensureAudioGraph() {
     });
     let node = sourceNode;
     eqFilters.forEach(filter => { node.connect(filter); node = filter; });
-    node.connect(gainNode);
-    gainNode.connect(analyser);
+    preampNode = audioContext.createGain();
+    preampNode.gain.value = 1;
+    node.connect(preampNode);
+    preampNode.connect(gainNode);
+
+    // ---------- 人声消除（伴奏模式） ----------
+    // 人声、贝斯、底鼓在混音里基本都摆在正中，左右声道里是同一份信号。
+    // 所以 L - R 会把人声整块减掉，剩下的 L-R 只保留左右不同的乐器（吉他、和声、混响尾巴）。
+    // 链路：gain ┬─ 干声(1) ─────────────────┐
+    //           └─ splitter ─(L-R)×0.85 ────┤→ karaokeOut → analyser
+    //                        └─ 低频补偿 ────┘
+    const karaokeSplitter = audioContext.createChannelSplitter(2);
+    karaokeDry = audioContext.createGain();
+    karaokeWet = audioContext.createGain();
+    const karaokeOut = audioContext.createGain();
+    karaokeDry.gain.value = 1;
+    karaokeWet.gain.value = 0;
+
+    gainNode.connect(karaokeDry).connect(karaokeOut);
+    gainNode.connect(karaokeSplitter);
+
+    // 差分本身能量就比原混音低（人声/贝斯被减掉了），保持 1.0 不额外放大：
+    // 再乘系数会把左右差异大的段落推到削波，宁可音量略降也不要失真
+    const diffLeft = audioContext.createGain();
+    const diffRight = audioContext.createGain();
+    diffLeft.gain.value = 1;
+    diffRight.gain.value = -1;
+    karaokeSplitter.connect(diffLeft, 0);
+    karaokeSplitter.connect(diffRight, 1);
+    diffLeft.connect(karaokeWet);
+    diffRight.connect(karaokeWet);
+
+    // 纯 L-R 会把 150Hz 以下的鼓和贝斯一起削掉，听起来像手机外放。
+    // 单独把低频的中置分量补回来，牺牲一点点低频人声换整体厚度。
+    const karaokeBassMix = audioContext.createGain();
+    karaokeBassMix.gain.value = 0.5;
+    const karaokeBassLow = audioContext.createBiquadFilter();
+    karaokeBassLow.type = 'lowpass';
+    karaokeBassLow.frequency.value = 150;
+    karaokeBassLow.Q.value = 0.7;
+    const karaokeBassGain = audioContext.createGain();
+    karaokeBassGain.gain.value = 0.9;
+    karaokeSplitter.connect(karaokeBassMix, 0);
+    karaokeSplitter.connect(karaokeBassMix, 1);
+    karaokeBassMix.connect(karaokeBassLow).connect(karaokeBassGain).connect(karaokeWet);
+    karaokeWet.connect(karaokeOut);
+
+    // 单声道探测：单声道音源 L 和 R 完全一样，相减直接静音。
+    // 挂两个只有输入的分析器（不参与输出），开开关前采样几帧判断。
+    karaokeProbeL = audioContext.createAnalyser();
+    karaokeProbeR = audioContext.createAnalyser();
+    karaokeProbeL.fftSize = 512;
+    karaokeProbeR.fftSize = 512;
+    karaokeSplitter.connect(karaokeProbeL, 0);
+    karaokeSplitter.connect(karaokeProbeR, 1);
+
+    karaokeOut.connect(analyser);
     analyser.connect(audioContext.destination);
     // 氛围灯专用 analyser：和波形图那个（smoothing 0.78）并联，但 smoothing 调低。
     // 原因：0.78 会把瞬时鼓点拉平、让持续音读数长期挂高 —— 这正是氛围灯
@@ -1493,6 +2166,9 @@ function ensureAudioGraph() {
     gainNode.connect(ambientAnalyser);
     applyEq();
     applyReplayGain(getTrack(state.currentId));
+    applyKaraoke();
+    // AudioContext 建好之后才真正有 sink 可以切：第一次播放时补一次
+    applyOutputDevice();
   } catch (error) {
     console.warn('Visualizer unavailable', error);
   }
@@ -1501,10 +2177,375 @@ function ensureAudioGraph() {
 function applyEq() {
   if (!eqFilters.length) return;
   // 关闭均衡等价于「10 段全 0 dB」；开启时走归一化，避免旧数据缺项时写进 NaN
-  const gains = state.prefs.eqEnabled ? normalizedEqGains() : EQ_BANDS.map(() => 0);
+  const on = Boolean(state.prefs.eqEnabled);
+  const gains = on ? normalizedEqGains() : EQ_BANDS.map(() => 0);
+  // AutoEq 的 FixedBandEQ 是「10 个 PK，Q=1.41」算出来的；原生的 shelving + Q=1
+  // 只在两端形状不同，但耳机校正要贴着官方曲线走，所以有型号时整条链切成 PK。
+  const correcting = on && Boolean(findAutoEqModel(state.prefs.eqHeadphone));
   eqFilters.forEach((filter, index) => {
+    const isEdge = index === 0 || index === EQ_BANDS.length - 1;
+    filter.type = correcting || !isEdge
+      ? 'peaking'
+      : (index === 0 ? 'lowshelf' : 'highshelf');
+    filter.Q.value = correcting ? 1.41 : 1;
     filter.gain.value = Math.max(-12, Math.min(12, gains[index]));
   });
+  if (preampNode) {
+    const db = correcting ? Number(state.prefs.eqPreamp) || 0 : 0;
+    preampNode.gain.value = 10 ** (db / 20);
+  }
+}
+
+/* --------------------------- 耳机校正（AutoEq） --------------------------- */
+
+/** 滑块步进是 0.5 dB：曲线按 0.5 取整，屏幕上看到的数字才和滤波器实际增益一致 */
+function roundToStep(value) {
+  return Math.round(Number(value) * 2) / 2;
+}
+
+/** 按 id 取 AutoEq 型号；数据由 autoeq.js 提供（build 时随 renderer 一起打包） */
+function findAutoEqModel(id) {
+  if (!id || typeof AUTOEQ_MODELS === 'undefined') return null;
+  return AUTOEQ_MODELS.find(item => item.id === id) || null;
+}
+
+/**
+ * 耳机型号选择：几百款型号原生 <select> 翻不动，改成「胶囊按钮 + 带搜索的弹层」。
+ * 选中后把曲线整条写进十段增益，之后仍可继续拖滑块微调 —— 校正只是起点，不是锁死的。
+ */
+function initEqHeadphone() {
+  const trigger = $('#eqHeadphoneTrigger');
+  const pop = $('#eqHpPop');
+  const search = $('#eqHpSearch');
+  if (!trigger || !pop || typeof AUTOEQ_MODELS === 'undefined') return;
+
+  trigger.addEventListener('click', () => {
+    if (pop.hidden) openEqHeadphonePicker(); else closeEqHeadphonePicker();
+  });
+
+  search.addEventListener('input', () => renderEqHeadphoneList(search.value));
+  search.addEventListener('keydown', event => {
+    const items = eqHpVisibleItems();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeEqHeadphonePicker();
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!items.length) return;
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      const next = eqHpActiveIndex < 0
+        ? (step > 0 ? 0 : items.length - 1)
+        : (eqHpActiveIndex + step + items.length) % items.length;
+      setEqHpActive(next);
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      const target = items[eqHpActiveIndex] || items[0];
+      if (target) applyEqHeadphoneSelection(target.dataset.id || '');
+      closeEqHeadphonePicker();
+    }
+  });
+
+  const listEl = $('#eqHpList');
+  listEl.addEventListener('click', event => {
+    const item = event.target.closest('.eq-hp-item');
+    if (!item) return;
+    applyEqHeadphoneSelection(item.dataset.id || '');
+    closeEqHeadphonePicker();
+  });
+  // 滚到底自动续下一批，两千多款不用一次塞进 DOM
+  listEl.addEventListener('scroll', () => {
+    if (eqHpDrawnTotal() >= eqHpQueue.length) return;
+    if (listEl.scrollTop + listEl.clientHeight < listEl.scrollHeight - 80) return;
+    appendEqHeadphoneRows(EQ_HP_MORE);
+    updateEqHpFoot(($('#eqHpSearch').value || '').trim());
+  });
+
+  // 点面板和按钮以外的地方就收起来
+  document.addEventListener('pointerdown', event => {
+    if (pop.hidden) return;
+    if (pop.contains(event.target) || trigger.contains(event.target)) return;
+    closeEqHeadphonePicker();
+  }, true);
+  // 面板是 fixed 定位，页面一滚就和按钮脱位了，跟着重新贴一次
+  document.addEventListener('scroll', () => {
+    if (!pop.hidden) positionEqHeadphonePicker();
+  }, true);
+  window.addEventListener('resize', () => closeEqHeadphonePicker());
+
+  syncEqHeadphoneTrigger();
+  syncEqHeadphoneHint();
+}
+
+/** 归一化：去掉空格 / 连字符 / 点，好让 "hd650" 命中 "HD 650"、"airpodspro2" 命中 "AirPods Pro 2" */
+function eqHpNorm(text) {
+  return String(text || '').toLowerCase().replace(/[\s\-_.()]+/g, '');
+}
+
+/**
+ * 搜索型号：空格分词的多个关键词是 AND，整串也会按「去分隔符」再匹配一次。
+ * 排序上品牌前缀优先，其次型号前缀，最后才是任意位置包含 —— 搜 "sony" 时
+ * Sony 自家型号排在最前，而不是 "Sony" 出现在型号名里的第三方耳机。
+ */
+function searchAutoEqModels(query) {
+  const raw = String(query || '').trim();
+  if (!raw) return AUTOEQ_MODELS.slice();
+  const words = raw.toLowerCase().split(/\s+/).filter(Boolean);
+  const glued = eqHpNorm(raw);
+  const hits = [];
+  for (const model of AUTOEQ_MODELS) {
+    const name = `${model.brand} ${model.model}`.toLowerCase();
+    const flat = eqHpNorm(name);
+    if (!words.every(word => name.includes(word) || flat.includes(eqHpNorm(word)))) continue;
+    let rank = 3;
+    if (model.brand.toLowerCase().startsWith(words[0])) rank = 0;
+    else if (eqHpNorm(`${model.brand}${model.model}`).startsWith(glued)) rank = 1;
+    else if (eqHpNorm(model.model).startsWith(glued)) rank = 2;
+    hits.push({ rank, model });
+  }
+  hits.sort((a, b) => a.rank - b.rank || a.model.brand.localeCompare(b.model.brand) || a.model.model.localeCompare(b.model.model));
+  return hits.map(hit => hit.model);
+}
+
+function eqHpVisibleItems() {
+  const list = $('#eqHpList');
+  return list ? [...list.querySelectorAll('.eq-hp-item')] : [];
+}
+
+let eqHpActiveIndex = -1;
+
+function setEqHpActive(index) {
+  const items = eqHpVisibleItems();
+  items.forEach(item => item.classList.remove('is-active'));
+  const item = items[index];
+  if (!item) { eqHpActiveIndex = -1; return; }
+  eqHpActiveIndex = index;
+  item.classList.add('is-active');
+  item.scrollIntoView({ block: 'nearest' });
+}
+
+function eqHpItem(id, brand, label, selected) {
+  const item = document.createElement('div');
+  item.className = 'eq-hp-item'
+    + (selected ? ' is-selected' : '');
+  item.dataset.id = id;
+  item.setAttribute('role', 'option');
+  item.setAttribute('aria-selected', selected ? 'true' : 'false');
+  if (brand) {
+    const b = document.createElement('span');
+    b.className = 'eq-hp-brand';
+    b.textContent = brand;
+    item.append(b);
+  }
+  const m = document.createElement('span');
+  m.className = 'eq-hp-model';
+  m.textContent = label;
+  item.append(m);
+  if (selected) {
+    const tick = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    tick.setAttribute('class', 'icon');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '#i-check');
+    tick.append(use);
+    item.append(tick);
+  }
+  return item;
+}
+
+/* 列表分批渲染：两千多款一次性塞进 DOM 会明显卡顿。
+   头戴和入耳各自维护一个队列，首屏两边都铺一批 —— 不然入耳要滚过 700 多条头戴才看得到 */
+const EQ_HP_FIRST = 60;
+const EQ_HP_MORE = 40;
+
+let eqHpGroups = {};
+let eqHpQueue = [];
+
+function eqHpGroupHeader(kind) {
+  const head = document.createElement('div');
+  head.className = 'eq-hp-group';
+  head.textContent = kind === 'over' ? '头戴式耳机' : '入耳式耳塞';
+  return head;
+}
+
+function eqHpDrawnTotal() {
+  return Object.values(eqHpGroups).reduce((sum, group) => sum + group.drawn, 0);
+}
+
+function updateEqHpFoot(query) {
+  const foot = $('#eqHpFoot');
+  if (!foot) return;
+  const drawn = eqHpDrawnTotal();
+  if (query) {
+    foot.textContent = `匹配 ${eqHpQueue.length} 款 · 已显示 ${drawn}`;
+    return;
+  }
+  const more = drawn < eqHpQueue.length ? ' · 滚动加载更多' : '';
+  foot.textContent = `共 ${eqHpQueue.length} 款 · 已显示 ${drawn}${more} · AutoEq`;
+}
+
+/** 每个分组各追加 count 条，两组同时长，滚起来才不会一边长一边没 */
+function appendEqHeadphoneRows(count) {
+  const current = state.prefs.eqHeadphone || '';
+  for (const group of Object.values(eqHpGroups)) {
+    const frag = document.createDocumentFragment();
+    const end = Math.min(group.queue.length, group.drawn + count);
+    for (; group.drawn < end; group.drawn += 1) {
+      const model = group.queue[group.drawn];
+      frag.append(eqHpItem(model.id, model.brand, model.model, model.id === current));
+    }
+    if (frag.childNodes.length) group.body.append(frag);
+  }
+}
+
+function renderEqHeadphoneList(query = '') {
+  const list = $('#eqHpList');
+  if (!list) return;
+  const q = String(query || '').trim();
+  eqHpQueue = searchAutoEqModels(q);
+  eqHpGroups = {};
+  eqHpActiveIndex = -1;
+  list.textContent = '';
+
+  if (!q) {
+    const current = state.prefs.eqHeadphone || '';
+    list.append(eqHpItem('', '', '关闭（不校正）', !current));
+  }
+
+  if (!eqHpQueue.length) {
+    const empty = document.createElement('div');
+    empty.className = 'eq-hp-empty';
+    empty.textContent = `没找到「${q}」，换个关键词试试`;
+    list.append(empty);
+    updateEqHpFoot(q);
+    return;
+  }
+
+  for (const kind of ['over', 'in']) {
+    const queue = eqHpQueue.filter(model => model.kind === kind);
+    if (!queue.length) continue;
+    list.append(eqHpGroupHeader(kind));
+    const body = document.createElement('div');
+    body.className = 'eq-hp-group-body';
+    body.dataset.kind = kind;
+    list.append(body);
+    eqHpGroups[kind] = { body, queue, drawn: 0 };
+  }
+
+  appendEqHeadphoneRows(EQ_HP_FIRST);
+  updateEqHpFoot(q);
+  list.scrollTop = 0;
+}
+
+function positionEqHeadphonePicker() {
+  const pop = $('#eqHpPop');
+  const trigger = $('#eqHeadphoneTrigger');
+  if (!pop || !trigger) return;
+  const rect = trigger.getBoundingClientRect();
+  const width = pop.offsetWidth || 360;
+  const height = pop.offsetHeight || 320;
+  const pad = 12;
+  let left = rect.right - width;
+  left = Math.max(pad, Math.min(left, innerWidth - width - pad));
+  let top = rect.bottom + 8;
+  if (top + height > innerHeight - pad) {
+    const above = rect.top - height - 8;
+    top = above >= pad ? above : Math.max(pad, innerHeight - height - pad);
+  }
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.top = `${Math.round(top)}px`;
+}
+
+function openEqHeadphonePicker() {
+  const pop = $('#eqHpPop');
+  const trigger = $('#eqHeadphoneTrigger');
+  const search = $('#eqHpSearch');
+  if (!pop || !trigger) return;
+  search.value = '';
+  renderEqHeadphoneList('');
+  pop.hidden = false;
+  trigger.setAttribute('aria-expanded', 'true');
+  positionEqHeadphonePicker();
+  // 重新贴一次：首次打开时高度还没算出来
+  positionEqHeadphonePicker();
+  search.focus();
+  // 已选中的那款如果正好在首批里，滚到它；在后面的批次里就不追了 ——
+  // 为了一项把上千条 DOM 一次性铺出来，打开面板会明显卡一下，而按钮上本来就写着当前型号
+  const selected = $('#eqHpList .eq-hp-item.is-selected');
+  if (selected) selected.scrollIntoView({ block: 'center' });
+}
+
+function closeEqHeadphonePicker() {
+  const pop = $('#eqHpPop');
+  const trigger = $('#eqHeadphoneTrigger');
+  if (!pop || pop.hidden) return;
+  pop.hidden = true;
+  trigger.setAttribute('aria-expanded', 'false');
+  eqHpActiveIndex = -1;
+}
+
+/** 选中（或清空）一条校正曲线 —— 按钮、键盘、点空白处都走这里 */
+function applyEqHeadphoneSelection(id) {
+  const model = findAutoEqModel(id);
+  state.prefs.eqHeadphone = model ? model.id : '';
+  if (model) {
+    state.prefs.eqGains = model.gains.map(roundToStep);
+    state.prefs.eqPreamp = model.preamp;
+    state.prefs.eqEnabled = true;
+    state.prefs.eqPreset = 'custom';
+    const toggle = $('#eqToggle');
+    if (toggle) toggle.checked = true;
+    // 曲线已经不是任何内置预设了，下拉切到「自定义」，免得显示着「流行」却放着校正曲线
+    const preset = $('#eqPreset');
+    if (preset) preset.value = 'custom';
+    showToast(`已应用 ${model.brand} ${model.model} 校正 · 预增益 ${model.preamp} dB`);
+  } else {
+    // 明确选「关闭」= 撤掉校正：十段归零回到直通，避免留下一条没有出处的曲线
+    state.prefs.eqPreamp = 0;
+    state.prefs.eqGains = EQ_BANDS.map(() => 0);
+    state.prefs.eqPreset = 'flat';
+    const preset = $('#eqPreset');
+    if (preset) preset.value = 'flat';
+    showToast('已关闭耳机校正');
+  }
+  applyEq();
+  renderEqSliders();
+  syncEqHeadphoneTrigger();
+  syncEqHeadphoneHint();
+  savePrefs();
+}
+
+/** 按钮上显示的当前型号 */
+function syncEqHeadphoneTrigger() {
+  const value = $('#eqHeadphoneValue');
+  const trigger = $('#eqHeadphoneTrigger');
+  const model = findAutoEqModel(state.prefs.eqHeadphone);
+  if (value) value.textContent = model ? `${model.brand} ${model.model}` : '未校正';
+  if (trigger) trigger.classList.toggle('has-value', Boolean(model));
+}
+
+/** 下拉下方那行小字：出处 + 预增益 + 有没有手动微调过 */
+function syncEqHeadphoneHint() {
+  const hint = $('#eqHeadphoneHint');
+  if (!hint) return;
+  const model = findAutoEqModel(state.prefs.eqHeadphone);
+  if (!model) {
+    hint.hidden = true;
+    hint.textContent = '';
+    return;
+  }
+  const gains = normalizedEqGains();
+  const tweaked = model.gains.some((gain, index) => Math.abs(roundToStep(gain) - gains[index]) > 0.01);
+  hint.hidden = false;
+  hint.textContent = [
+    model.kind === 'over' ? '头戴' : '入耳',
+    `预增益 ${model.preamp} dB`,
+    // 曲线还留着，但整条均衡被关掉了 —— 说明白，别让人以为校正还在生效
+    state.prefs.eqEnabled ? '' : '均衡器已关闭，校正未生效',
+    tweaked ? '已在曲线上手动微调' : ''
+  ].filter(Boolean).join(' · ');
 }
 
 function applyReplayGain(track) {
@@ -1515,6 +2556,88 @@ function applyReplayGain(track) {
     return;
   }
   gainNode.gain.value = Math.max(0.1, Math.min(4, 10 ** (db / 20)));
+}
+
+/* ------------------------------- 人声消除 ------------------------------- */
+
+/**
+ * 干湿切换。用 setTargetAtTime 而不是直接赋值：直接赋值会在波形中间
+ * 产生一个跳变，听起来就是「啪」的一声爆音。
+ */
+function applyKaraoke() {
+  if (!karaokeDry || !karaokeWet || !audioContext) return;
+  const on = Boolean(state.prefs.karaoke);
+  const now = audioContext.currentTime;
+  karaokeDry.gain.setTargetAtTime(on ? 0 : 1, now, 0.02);
+  karaokeWet.gain.setTargetAtTime(on ? 1 : 0, now, 0.02);
+}
+
+function rmsOf(samples) {
+  let sum = 0;
+  for (let i = 0; i < samples.length; i += 1) sum += samples[i] * samples[i];
+  return Math.sqrt(sum / samples.length);
+}
+
+/**
+ * 判断当前音源是不是单声道：单声道时 L 和 R 完全一致，L-R 恒等于 0，
+ * 一开开关就整首歌静音，必须在开启前拦下来。
+ * 采样 6 帧（约 130ms）取峰值，比只看一帧靠谱：单帧可能正好落在过零点附近。
+ */
+function detectMonoSource() {
+  return new Promise(resolve => {
+    if (!karaokeProbeL || !karaokeProbeR || audio.paused || audio.readyState < 2) {
+      resolve(false);
+      return;
+    }
+    const bufL = new Float32Array(karaokeProbeL.fftSize);
+    const bufR = new Float32Array(karaokeProbeR.fftSize);
+    let maxL = 0;
+    let maxR = 0;
+    let frames = 0;
+    const sample = () => {
+      karaokeProbeL.getFloatTimeDomainData(bufL);
+      karaokeProbeR.getFloatTimeDomainData(bufR);
+      maxL = Math.max(maxL, rmsOf(bufL));
+      maxR = Math.max(maxR, rmsOf(bufR));
+      frames += 1;
+      if (frames < 6) { setTimeout(sample, 24); return; }
+      // 有声音、但右声道比左声道小 26dB 以上 → 按单声道处理
+      resolve(maxL > 0.004 && maxR < maxL * 0.05);
+    };
+    sample();
+  });
+}
+
+function updateKaraokeUi() {
+  const button = $('#fullKaraoke');
+  if (!button) return;
+  const on = Boolean(state.prefs.karaoke);
+  button.classList.toggle('active', on);
+  button.setAttribute('aria-pressed', on ? 'true' : 'false');
+  button.title = on ? '伴奏模式（已消除人声）· 点击恢复原声' : '人声消除（伴奏模式）';
+  const use = button.querySelector('use');
+  if (use) use.setAttribute('href', on ? '#i-mic-off' : '#i-mic');
+}
+
+async function toggleKaraoke() {
+  // 没播过歌时音频图还没建，先建（点击本身就是用户手势，AudioContext 不会被挂起）
+  ensureAudioGraph();
+  if (!karaokeDry) {
+    showToast('音频引擎还没准备好，先播一首歌再试');
+    return;
+  }
+  if (!state.prefs.karaoke) {
+    const mono = await detectMonoSource();
+    if (mono) {
+      showToast('这首是单声道音源，左右相减会直接变无声，换一首立体声的歌再试');
+      return;
+    }
+  }
+  state.prefs.karaoke = !state.prefs.karaoke;
+  savePrefs();
+  applyKaraoke();
+  updateKaraokeUi();
+  showToast(state.prefs.karaoke ? '已消除人声（伴奏模式）' : '已恢复原声');
 }
 
 function applyPlaybackRate() {
@@ -1650,7 +2773,13 @@ async function playTrack(id, forcePlay = true) {
         renderLyricSource();
         renderLyrics();
         pushDesktopLyricsState();
-        showToast(track._lyricSource === 'embedded' ? '已读取歌曲内嵌歌词' : '已自动载入同名歌词文件');
+        showToast(track._lyricSource === 'embedded'
+          ? '已读取歌曲内嵌歌词'
+          : track._lyricSource === 'lrclib'
+            ? '已从 LRCLIB 匹配到同步歌词'
+            : track._lyricSource === 'lrclib-plain'
+              ? '已从 LRCLIB 匹配到歌词（无时间轴）'
+              : '已自动载入同名歌词文件');
       }
     });
   }
@@ -1872,14 +3001,20 @@ function removeTrack(id, options = {}) {
   }
 
   if (!options.silent) {
-    saveState();
-    saveProgress();
-    saveLibrary();
-    updatePlayerUi();
-    updatePlayIcons();
-    renderAll();
+    persistAndRefresh();
   }
   return true;
+}
+
+/** 改完资料库后的统一收尾：落盘 + 刷新所有依赖这些状态的界面。
+    删除曲目、清空资料库原来是各写一遍这六行，漏一处就会出现「删了但界面没更新」。 */
+function persistAndRefresh() {
+  saveState();
+  saveProgress();
+  saveLibrary();
+  updatePlayerUi();
+  updatePlayIcons();
+  renderAll();
 }
 
 function clearLibrary() {
@@ -1902,12 +3037,7 @@ function clearLibrary() {
   state.selection.clear();
   state.selectMode = false;
   state.playlists.forEach(playlist => { playlist.tracks = []; });
-  saveState();
-  saveProgress();
-  saveLibrary();
-  updatePlayerUi();
-  updatePlayIcons();
-  renderAll();
+  persistAndRefresh();
   showToast(`已移除 ${total} 首歌曲记录`);
 }
 
@@ -2075,14 +3205,33 @@ function syncVolumeUi() {
   });
 }
 
+// updateProgress 每秒被 timeupdate 调约 4 次，下面这几个节点在页面生命周期内不变，
+// 每次都走 document.querySelector 是纯浪费，惰性缓存一份；isConnected 兜底节点被替换的情况。
+const progressEls = {};
+function progressEl(id) {
+  const cached = progressEls[id];
+  if (cached && cached.isConnected) return cached;
+  return (progressEls[id] = document.getElementById(id));
+}
+
+// slider 外层那个 .bar-range 也是固定的，WeakMap 缓存（节点被替换时自动失效，不会留垃圾）
+const rangeBarCache = new WeakMap();
+
 function paintRange(slider, ratio) {
   if (!slider) return;
   const safe = Number.isFinite(ratio) ? ratio : 0;
   const clamped = Math.max(0, Math.min(1, safe));
   slider.style.setProperty('--range-pct', `${(clamped * 100).toFixed(2)}%`);
+  // 0~1 的无单位值：原生 range 的手柄中心只在 (轨道宽 - 手柄宽) 的范围内走，
+  // 而渐变百分比按整条轨道算，两者会差半个手柄宽 —— 用这个数在 CSS 里做补偿
+  slider.style.setProperty('--range-ratio', clamped.toFixed(4));
   // 播放页那条「轨道 + 填充」是分离的两层，填充宽度要 0~1 的数字。
   // 变量只往下继承，写在内层 input 上外层的 .br-fill 读不到，所以写在容器上。
-  const bar = slider.closest('.bar-range');
+  let bar = rangeBarCache.get(slider);
+  if (bar === undefined) {
+    bar = slider.closest('.bar-range');
+    rangeBarCache.set(slider, bar);
+  }
   if (bar) bar.style.setProperty('--range-p', clamped.toFixed(4));
 }
 
@@ -2133,16 +3282,25 @@ function rememberProgress(force = false) {
 function updateProgress() {
   const duration = audio.duration;
   const ratio = Number.isFinite(duration) && duration > 0 ? audio.currentTime / duration : 0;
+  const seekSlider = progressEl('seekSlider');
+  const fullSeekSlider = progressEl('fullSeekSlider');
   if (!seeking) {
-    $('#seekSlider').value = Math.round(ratio * 1000);
-    $('#fullSeekSlider').value = Math.round(ratio * 1000);
+    if (seekSlider) seekSlider.value = Math.round(ratio * 1000);
+    if (fullSeekSlider) fullSeekSlider.value = Math.round(ratio * 1000);
   }
-  paintRange($('#seekSlider'), seeking ? Number($('#seekSlider').value) / 1000 : ratio);
-  paintRange($('#fullSeekSlider'), seeking ? Number($('#fullSeekSlider').value) / 1000 : ratio);
-  $('#currentTime').textContent = formatTime(audio.currentTime);
-  $('#fullCurrentTime').textContent = formatTime(audio.currentTime);
-  $('#totalTime').textContent = formatTime(duration);
-  $('#fullTotalTime').textContent = formatTime(duration);
+  paintRange(seekSlider, seeking && seekSlider ? Number(seekSlider.value) / 1000 : ratio);
+  paintRange(fullSeekSlider, seeking && fullSeekSlider ? Number(fullSeekSlider.value) / 1000 : ratio);
+  const current = formatTime(audio.currentTime);
+  const total = formatTime(duration);
+  const currentTimeEl = progressEl('currentTime');
+  const fullCurrentTimeEl = progressEl('fullCurrentTime');
+  const totalTimeEl = progressEl('totalTime');
+  const fullTotalTimeEl = progressEl('fullTotalTime');
+  // 同一秒内重复赋值是白改 DOM：文本没变就不碰（currentTime 在变，total 基本不变）
+  if (currentTimeEl && currentTimeEl.textContent !== current) currentTimeEl.textContent = current;
+  if (fullCurrentTimeEl && fullCurrentTimeEl.textContent !== current) fullCurrentTimeEl.textContent = current;
+  if (totalTimeEl && totalTimeEl.textContent !== total) totalTimeEl.textContent = total;
+  if (fullTotalTimeEl && fullTotalTimeEl.textContent !== total) fullTotalTimeEl.textContent = total;
   updateLyricsActive();
   pushDesktopLyricsState();
   rememberProgress();
@@ -2601,19 +3759,35 @@ function renderLyricSource() {
   label.textContent = '';
 }
 
-function updateLyricsActive(forceScroll = false) {
-  // 歌词的 DOM 全都挂在 #fullPlayer 里，它没打开时这轮同步纯粹是白做
-  // （timeupdate 每秒触发约 4 次，每次都还要遍历歌词行 + 更新逐字状态）。
-  // 全屏页一打开就会走 renderLyrics() → 这里被重新调用一次，不会漏掉同步。
-  if (!forceScroll && !$('#fullPlayer')?.classList.contains('open')) return;
+/**
+ * 算出「当前播放位置落在哪一句歌词上」。
+ * timeupdate 和逐字 tick 都要这份结果，原来是各写一遍完全相同的六行（含那个 0.18s 的提前量），
+ * 抽出来以后歌词偏移量的口径只有一处，不会两边调不同步。
+ * 返回 null 表示这首歌没有歌词。
+ */
+function resolveActiveLyric() {
   const lyrics = getLyrics(getTrack(state.currentId));
-  if (!lyrics.length) return;
-  const offset = currentLyricOffset();
-  const position = audio.currentTime + .18 + offset;
+  if (!lyrics.length) return null;
+  const position = audio.currentTime + .18 + currentLyricOffset();
+  // 线性扫到最后一个「时间已到」的行；歌词量级不大，二分在这里没有收益
   let active = 0;
   for (let i = 0; i < lyrics.length; i += 1) {
     if (position >= lyrics[i].time) active = i;
   }
+  return { lyrics, active, position };
+}
+
+function updateLyricsActive(forceScroll = false) {
+  // 歌词的 DOM 全都挂在 #fullPlayer 里，它没打开时这轮同步纯粹是白做
+  // （timeupdate 每秒触发约 4 次，每次都还要遍历歌词行 + 更新逐字状态）。
+  // 全屏页一打开就会走 renderLyrics() → 这里被重新调用一次，不会漏掉同步。
+  if (!forceScroll) {
+    if (!fullPlayerNode || !fullPlayerNode.isConnected) fullPlayerNode = $('#fullPlayer');
+    if (!fullPlayerNode || !fullPlayerNode.classList.contains('open')) return;
+  }
+  const resolved = resolveActiveLyric();
+  if (!resolved) return;
+  const { active } = resolved;
   const changed = activeLineIndex !== active;
   const playChanged = state.playing !== lyricPlayingFlag;
   lyricPlayingFlag = state.playing;
@@ -2632,7 +3806,7 @@ function updateLyricsActive(forceScroll = false) {
       activeNode.classList.toggle('current', state.playing);
     }
   }
-  updateKaraoke(lyrics, active, position);
+  updateKaraoke(resolved.lyrics, active, resolved.position);
   // 暂停时点「回到当前」也应该滚过去；旧条件要求 state.playing 为真，暂停状态下按钮等于失效。
   if ((state.playing || forceScroll) && (changed || forceScroll) && (!lyricsManualScroll || forceScroll)) {
     const activeLine = lyricLineNodes[active];
@@ -2650,18 +3824,22 @@ let lyricPlayingFlag = null;
 let lyricLineNodes = [];
 let lyricCharNodes = [];
 
+// 逐字刷新要用到的两个缓存：
+// - fullPlayerNode：#fullPlayer 在生命周期里只有一个节点，不必每 80ms 查一次 DOM
+// - karaokeTimeline*：同一行的逐字时间轴是常量，换行才需要重算
+let fullPlayerNode = null;
+let karaokeTimelineLine = null;
+let karaokeTimelineTimes = [];
+
 // 动画帧级的逐字刷新（只更新当前句，避免频繁滚动）
 function karaokeTick() {
-  if (!state.playing || !$('#fullPlayer')?.classList.contains('open')) return;
-  const lyrics = getLyrics(getTrack(state.currentId));
-  if (!lyrics.length) return;
-  const offset = currentLyricOffset();
-  const position = audio.currentTime + .18 + offset;
-  let active = 0;
-  for (let i = 0; i < lyrics.length; i += 1) {
-    if (position >= lyrics[i].time) active = i;
-  }
-  updateKaraoke(lyrics, active, position);
+  if (!state.playing) return;
+  // isConnected 兜底：万一节点被替换掉，下一帧自动重新取一次
+  if (!fullPlayerNode || !fullPlayerNode.isConnected) fullPlayerNode = $('#fullPlayer');
+  if (!fullPlayerNode || !fullPlayerNode.classList.contains('open')) return;
+  const resolved = resolveActiveLyric();
+  if (!resolved) return;
+  updateKaraoke(resolved.lyrics, resolved.active, resolved.position);
 }
 
 // 逐字点亮 + 轻微漂浮
@@ -2671,8 +3849,20 @@ function updateKaraoke(lyrics, active, position) {
   // 逐字节点已在 renderLyrics 里缓存好，不再每 80ms 按属性选择器查一次
   const chars = lyricCharNodes[active];
   if (!chars || !chars.length) return;
-  const times = charTimeline(line, lyrics[active + 1]);
-  const revealed = state.playing ? times.filter(time => position >= time).length : chars.length;
+  // 同一行的每个字落在什么时刻是固定的，换行时才重算（原来每次 tick 都重算，内部还有展开和数组分配）
+  if (karaokeTimelineLine !== line) {
+    karaokeTimelineLine = line;
+    karaokeTimelineTimes = charTimeline(line, lyrics[active + 1]);
+  }
+  const times = karaokeTimelineTimes;
+  // 原来是 times.filter(...).length —— 每 80ms 新建一个数组只为数个数，改成直接计数
+  let revealed = chars.length;
+  if (state.playing) {
+    revealed = 0;
+    for (let i = 0; i < times.length; i += 1) {
+      if (position >= times[i]) revealed += 1;
+    }
+  }
   for (let i = 0; i < chars.length; i += 1) {
     const node = chars[i];
     const on = i < revealed;
@@ -2691,6 +3881,7 @@ const PAGE_LABELS = {
   online: '在线',
   library: '歌单',
   playlist: '歌单详情',
+  collection: '专辑',
   songs: '歌曲',
   favorites: '喜爱',
   recent: '最近添加',
@@ -2699,7 +3890,7 @@ const PAGE_LABELS = {
 };
 
 // 详情页不是独立的一级入口：歌单详情要算在「歌单」这个导航项下面
-const PAGE_NAV_ALIAS = { playlist: 'library' };
+const PAGE_NAV_ALIAS = { playlist: 'library', collection: 'library' };
 
 function showPage(page) {
   const changed = state.page !== page;
@@ -2720,8 +3911,9 @@ function showPage(page) {
   // 喜爱页混着本地收藏、在线收藏和账号红心，进页时重渲染一次才能拿到最新状态
   if (page === 'favorites') renderFavorites();
   // 页面 key 是 library（不是 playlists），以前这里恒不成立，切回歌单页时列表不会刷新
-  if (page === 'library') { renderPlaylists(); if (typeof renderAlbums === 'function') renderAlbums(); }
+  if (page === 'library') { renderPlaylists(); if (typeof renderAlbums === 'function') renderAlbums(); if (typeof renderArtists === 'function') renderArtists(); }
   if (page === 'playlist') renderPlaylistPage();
+  if (page === 'collection') renderCollectionPage();
   if (!changed) return;
   // 搜索词只属于搜索页。离开搜索页时不清掉的话，「歌曲」列表会继续被这个看不见的词过滤，
   // 用户会以为资料库里的歌丢了。真正的搜索结果是独立渲染的，不受影响。
@@ -2743,18 +3935,41 @@ function showTab(tab) {
 }
 
 function setTitleBarTone(mode) {
-  const desktop = window.orangeDesktop;
-  if (!desktop?.setTitleBarOverlay) return;
-  // 标题栏整体透明，只有符号（最小化/最大化/关闭）随页面深浅换色；
-  // 高度与主进程建窗时用的 TITLE_BAR_HEIGHT 保持一致。
-  desktop.setTitleBarOverlay({
-    color: 'rgba(0,0,0,0)',
-    // 深色歌词页用浅色符号；浅色歌词页和主界面用深色符号，否则白符号压在浅背景上完全看不见
-    symbolColor: mode === 'full' ? '#f4f4f5' : '#17181b',
-    height: TITLE_BAR_HEIGHT
-  });
+  // 标题栏按钮已改成自绘（frame:false），颜色由 CSS 跟随主题走，
+  // 系统 overlay 通道不再需要；这里只保留 body 上的语气类给样式用。
   document.body.classList.toggle('tone-full', mode === 'full');
   document.body.classList.toggle('tone-light', mode === 'light');
+}
+
+/** 自绘窗口按钮：最大化后图标换成「还原」，并让 body 知道当前状态
+    主界面标题栏和歌词页右上角各有一套，两个一起同步 */
+function syncMaximizeUi(maximized) {
+  const on = Boolean(maximized);
+  document.body.classList.toggle('is-maximized', on);
+  ['#winMaximize', '#lyricsWinMax'].forEach(selector => {
+    const button = $(selector);
+    if (!button) return;
+    button.querySelector('use')?.setAttribute('href', on ? '#i-win-restore' : '#i-win-max');
+    button.setAttribute('aria-label', on ? '还原' : '最大化');
+    button.title = on ? '还原' : '最大化';
+  });
+}
+
+function bindWindowControls() {
+  $('#winMinimize')?.addEventListener('click', () => window.orangeDesktop?.minimize?.());
+  $('#winMaximize')?.addEventListener('click', () => window.orangeDesktop?.toggleMaximize?.());
+  $('#winClose')?.addEventListener('click', () => window.orangeDesktop?.closeWindow?.());
+  // 歌词页右上角那套三键：歌词页把标题栏整块盖住了，没有它就没法最小化 / 关窗
+  $('#lyricsWinMin')?.addEventListener('click', () => window.orangeDesktop?.minimize?.());
+  $('#lyricsWinMax')?.addEventListener('click', () => window.orangeDesktop?.toggleMaximize?.());
+  $('#lyricsWinClose')?.addEventListener('click', () => window.orangeDesktop?.closeWindow?.());
+  // 拖拽区不在拖动区之外的按钮上：双击标题栏空白处 = 最大化 / 还原
+  $('#titlebar')?.addEventListener('dblclick', event => {
+    if (event.target.closest('.window-controls')) return;
+    window.orangeDesktop?.toggleMaximize?.();
+  });
+  window.orangeDesktop?.onMaximizedChange?.(syncMaximizeUi);
+  window.orangeDesktop?.isMaximized?.().then(syncMaximizeUi).catch(() => {});
 }
 
 function toggleWindowMaximize() {
@@ -2955,10 +4170,13 @@ function applyLyricTheme() {
   document.body.classList.remove('lyric-light');
 
   const coverUrl = String(image.src || '');
+  // 占位封面（assets/cover-default.png）参与取色的后果：整页背景被染成品牌橙的
+  // 一片土黄，而且它会被放大模糊后铺满背景。这首歌本来就没有封面，不该有主题色。
+  const isPlaceholder = !coverUrl || /\/assets\/cover-default\.png(\?|#|$)/i.test(coverUrl);
   // 设置背景图不需要读像素，先无条件写进去。
   // 旧实现把这一步放在 canvas 取色成功之后，而 file:// 图片会污染 canvas，
   // getImageData 必然抛 SecurityError —— 结果「跟随封面」的背景永远是空的。
-  if (coverUrl) {
+  if (!isPlaceholder) {
     player.style.setProperty('--lyric-cover-url', `url("${coverUrl.replace(/["\\]/g, '\\$&')}")`);
   } else {
     player.style.removeProperty('--lyric-cover-url');
@@ -2974,7 +4192,7 @@ function applyLyricTheme() {
   const update = async () => {
     // 走和 --cover-accent 同一条采样链路（主进程解码成 data URL），
     // 避开 file:// 直接 drawImage 导致的 canvas 污染。
-    const rgb = await applyCoverAccent(coverUrl);
+    const rgb = await applyCoverAccent(isPlaceholder ? '' : coverUrl);
     if (lyricThemeCoverKey !== key) return; // 采样期间切歌 / 换主题，丢弃过期结果
     if (Array.isArray(rgb) && rgb.length === 3) {
       const [r, g, b] = rgb;
@@ -3089,6 +4307,43 @@ document.addEventListener('click', event => {
   const pageButton = event.target.closest('[data-page]');
   if (pageButton) {
     showPage(pageButton.dataset.page);
+    return;
+  }
+
+  // ---------- 资料库：歌单 / 专辑 / 艺术家 ----------
+  const libraryViewButton = event.target.closest('[data-library-view]');
+  if (libraryViewButton) {
+    switchLibraryView(libraryViewButton.dataset.libraryView);
+    return;
+  }
+
+  const albumCard = event.target.closest('[data-album-index]');
+  if (albumCard) {
+    const kind = albumCard.dataset.albumKind || 'album';
+    const index = Number(albumCard.dataset.albumIndex);
+    // 卡片右下角那颗播放键：直接整组开播，不进详情页
+    if (event.target.closest('[data-album-play]')) {
+      const group = collectionGroups(kind)[index];
+      if (group?.tracks.length) {
+        state.collection = { kind, key: group.key };
+        playCollection('', false);
+      }
+      return;
+    }
+    openCollectionPage(kind, index);
+    return;
+  }
+
+  if (event.target.closest('[data-col-back]')) {
+    closeCollectionPage();
+    return;
+  }
+
+  const collectionAction = event.target.closest('[data-col-action]');
+  if (collectionAction) {
+    const action = collectionAction.dataset.colAction;
+    if (action === 'play-all') playCollection('', false);
+    if (action === 'shuffle') playCollection('', true);
     return;
   }
 
@@ -3263,12 +4518,21 @@ document.addEventListener('click', event => {
   const rowPlayButton = event.target.closest('[data-pl-play]');
   if (rowPlayButton) {
     event.stopPropagation();
+    // 专辑 / 艺术家详情页复用同一套行模板，点播放要走当前分组，不是上一个歌单
+    if (event.target.closest('#colTrackList')) {
+      playCollection(rowPlayButton.dataset.plPlay);
+      return;
+    }
     playPlaylistFrom(currentPlaylistId, rowPlayButton.dataset.plPlay);
     return;
   }
 
   const playlistRow = event.target.closest('[data-pl-row]');
   if (playlistRow) {
+    if (event.target.closest('#colTrackList')) {
+      playCollection(playlistRow.dataset.plRow);
+      return;
+    }
     // 点整行 = 从这首开始按歌单顺序播放
     playPlaylistFrom(currentPlaylistId, playlistRow.dataset.plRow);
     return;
@@ -3336,6 +4600,7 @@ document.addEventListener('click', event => {
   if (action === 'close-playlist-modal') $('#playlistModal').close();
   if (action === 'close-add-modal') $('#addModal').close();
   if (action === 'close-lyrics-modal') $('#lyricsModal').close();
+  if (action === 'close-prompt') $('#promptModal').close();
   if (action === 'show-favorites') {
     showPage('library');
     showTab('favorites');
@@ -3370,10 +4635,12 @@ document.addEventListener('click', event => {
   if (action === 'close-playlist-edit-modal') $('#playlistEditModal').close();
   if (action === 'expand-player') openFullPlayer();
   if (action === 'collapse-player') closeFullPlayer();
+  if (action === 'toggle-fullscreen') toggleFullscreen();
   if (action === 'open-queue') toggleQueue(true);
   if (action === 'close-queue') toggleQueue(false);
   if (action === 'open-lyrics') openFullPlayer();
   if (action === 'open-desktop-lyrics') toggleDesktopLyrics();
+  if (action === 'mini-player') toggleMiniWindow();
   if (action === 'open-more') {
     if (state.currentId && getTrack(state.currentId)) openAddModal(state.currentId);
     else showToast('还没有正在播放的歌曲');
@@ -3388,6 +4655,7 @@ $('#prevButton').addEventListener('click', previousTrack);
 $('#fullPrev').addEventListener('click', previousTrack);
 $('#miniFavorite').addEventListener('click', () => toggleFavorite());
 $('#fullFavorite').addEventListener('click', () => toggleFavorite());
+$('#fullKaraoke').addEventListener('click', toggleKaraoke);
 
 [$('#shuffleButton'),$('#fullShuffle')].forEach(button => button.addEventListener('click', toggleShuffleMode));
 
@@ -3488,6 +4756,60 @@ function toggleLyricsView() {
   else openFullPlayer();
 }
 
+/* ---------- 窗口全屏（F11 / 播放条右侧按钮 / 歌词页右上角按钮 / 双击顶部边框） ----------
+   注意和「全屏播放页」区分：那个只是把歌词页铺满窗口，窗口本身还有标题栏和任务栏；
+   这里让窗口真正占满整块屏幕，同时把自绘标题栏收掉（见 body.is-fullscreen 样式）。
+   两个入口：主界面播放条最右那颗、歌词页右上角那颗 —— 同一颗按钮的两种皮肤，
+   图标 / 提示文字在切换时一起换。 */
+function syncFullscreenUi(on) {
+  const full = Boolean(on);
+  document.body.classList.toggle('is-fullscreen', full);
+  ['#fullScreenBtn', '#miniFullscreenBtn'].forEach(selector => {
+    const button = $(selector);
+    if (!button) return;
+    const use = button.querySelector('use');
+    if (use) use.setAttribute('href', full ? '#i-fullscreen-exit' : '#i-fullscreen');
+    button.setAttribute('aria-label', full ? '退出全屏' : '全屏');
+    button.setAttribute('aria-pressed', full ? 'true' : 'false');
+    button.title = full ? '退出全屏（F11）' : '全屏（F11）';
+  });
+}
+
+function toggleFullscreen() {
+  const desktop = window.orangeDesktop;
+  // 先乐观翻自身 UI，再发命令：主进程的 leave-full-screen 在 Windows 上有时候
+  // 不回调，等事件会导致退出全屏后图标还停在「向内四角」的样子。
+  // 真回调晚到也只是用真实状态再校准一次，不会打架。
+  const next = !document.body.classList.contains('is-fullscreen');
+  syncFullscreenUi(next);
+  if (desktop && typeof desktop.toggleFullscreen === 'function') {
+    desktop.toggleFullscreen();
+    return;
+  }
+  // 浏览器预览兜底：没有主进程时退回网页全屏，失败就把 UI 退回去
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => syncFullscreenUi(true));
+  else document.documentElement.requestFullscreen?.().catch(() => syncFullscreenUi(false));
+}
+
+/* 双击顶部「窗口边框」退回窗口。
+   Windows 里双击标题栏 = 最大化 / 还原，全屏后标题栏没了，多数播放器就把
+   「双击最上面那条边」当成同一个手势 —— 这里照这个习惯来，主界面和歌词页都生效。
+   只认顶部 24px：够得着，又不会跟页面里的双击（点歌、开卡片）抢事件；
+   双击点在某些控件上时不处理，交还给控件自己。 */
+const FULLSCREEN_EDGE_H = 24;
+document.addEventListener('dblclick', event => {
+  if (!document.body.classList.contains('is-fullscreen')) return;
+  if (event.clientY > FULLSCREEN_EDGE_H) return;
+  if (event.target?.closest?.('button, a, input, textarea, select, label, [contenteditable="true"]')) return;
+  event.preventDefault();
+  toggleFullscreen();
+}, true);
+
+if (window.orangeDesktop?.onFullscreenChange) window.orangeDesktop.onFullscreenChange(syncFullscreenUi);
+// 启动时补一次：上次是全屏状态、或用户中途 Ctrl+R 重载，按钮图标不能停在「全屏」
+window.orangeDesktop?.isFullscreen?.().then(syncFullscreenUi).catch(() => {});
+document.addEventListener('fullscreenchange', () => syncFullscreenUi(Boolean(document.fullscreenElement)));
+
 function handleShortcut(event) {
   const key = event.key;
   const lower = typeof key === 'string' ? key.toLowerCase() : '';
@@ -3496,6 +4818,11 @@ function handleShortcut(event) {
   if (key === 'Escape') {
     if (!$('#lyricMenu')?.hidden) {
       closeLyricMenu();
+      return true;
+    }
+    // 窗口全屏时 Esc 先退全屏：歌词页还开着就留在歌词页，再按一次才退出歌词页
+    if (document.body.classList.contains('is-fullscreen')) {
+      toggleFullscreen();
       return true;
     }
     if ($('#fullPlayer').classList.contains('open')) closeFullPlayer();
@@ -3517,12 +4844,12 @@ function handleShortcut(event) {
   }
   if (event.code === 'MediaTrackNext') {
     event.preventDefault();
-    nextTrack();
+    mediaSkip(1);
     return true;
   }
   if (event.code === 'MediaTrackPrevious') {
     event.preventDefault();
-    previousTrack();
+    mediaSkip(-1);
     return true;
   }
   const combo = formatShortcutKey(event);
@@ -3551,6 +4878,7 @@ function runShortcutAction(action) {
     case 'queue': toggleQueue(); break;
     case 'shuffle': toggleShuffleMode(); break;
     case 'repeat': cycleRepeatMode(); break;
+    case 'fullscreen': toggleFullscreen(); break;
     case 'search':
       showPage('search');
       setTimeout(() => $('#globalSearch').focus(), 50);
@@ -3630,9 +4958,10 @@ $('#featureImport')?.addEventListener('click', () => {
   showPage('import');
 });
 
-audio.addEventListener('play', () => { state.playing = true; updatePlayIcons(); updateLyricsActive(); pushDesktopLyricsState(); });
-audio.addEventListener('pause', () => { state.playing = false; updatePlayIcons(); updateLyricsActive(); pushDesktopLyricsState(); });
-audio.addEventListener('timeupdate', updateProgress);
+audio.addEventListener('play', () => { state.playing = true; audioErrorStreak = 0; updatePlayIcons(); updateLyricsActive(); pushDesktopLyricsState(); if (smtcSupported()) navigator.mediaSession.playbackState = 'playing'; });
+audio.addEventListener('pause', () => { state.playing = false; updatePlayIcons(); updateLyricsActive(); pushDesktopLyricsState(); if (smtcSupported()) navigator.mediaSession.playbackState = 'paused'; });
+audio.addEventListener('timeupdate', () => { updateProgress(); syncMediaPosition(); });
+audio.addEventListener('seeked', () => syncMediaPosition(true));
 audio.addEventListener('loadedmetadata', () => {
   const track = getTrack(state.currentId);
   if (track && Number.isFinite(audio.duration)) {
@@ -3647,6 +4976,43 @@ audio.addEventListener('loadedmetadata', () => {
   }
 });
 audio.addEventListener('ended', handleTrackEnded);
+
+/* 音频加载失败兜底：文件被移走 / 磁盘上被删 / 格式不受支持时，<audio> 只会默默
+   触发一个 error 事件。原来没人监听，用户看到的就是「点了播放，进度条不动、
+   也没声音、什么都不提示」。这里给一句明确提示，并在连播时自动跳过。
+   连跳 3 首就停下来 —— 整个文件夹被移走时不能一首接一首地刷屏。 */
+let audioErrorStreak = 0;
+audio.addEventListener('error', () => {
+  // 主动 removeAttribute('src') + load() 也会触发 error，那种情况不是「播不了」
+  if (!audio.getAttribute('src')) return;
+  const track = getTrack(state.currentId);
+  state.playing = false;
+  updatePlayIcons();
+  audioErrorStreak += 1;
+  if (audioErrorStreak >= 3) {
+    audioErrorStreak = 0;
+    showToast('连续几首都无法播放，已停止自动跳过（文件可能被移动或删除）');
+    return;
+  }
+  showToast(`无法播放「${track?.title || '当前歌曲'}」，文件可能已被移动或格式不受支持`);
+  if (track && !track._online && state.queue.length > 1) {
+    setTimeout(() => nextTrack(true), 900);
+  }
+});
+
+// 开着人声消除切到单声道音源会整首变哑，载入新歌后补一次检测，命中就自动关掉
+audio.addEventListener('loadedmetadata', () => {
+  if (!state.prefs.karaoke) return;
+  setTimeout(async () => {
+    if (!state.prefs.karaoke) return;
+    if (!(await detectMonoSource())) return;
+    state.prefs.karaoke = false;
+    savePrefs();
+    applyKaraoke();
+    updateKaraokeUi();
+    showToast('这首是单声道音源，已自动关闭人声消除');
+  }, 320);
+});
 // 关闭软件前把当前播放位置立即落盘，保证下次打开时能准确续播
 window.addEventListener('beforeunload', () => rememberProgress(true));
 audio.addEventListener('volumechange', () => {
@@ -3726,13 +5092,8 @@ $('#editResetCover')?.addEventListener('click', () => {
 });
 $('#playlistEditForm')?.addEventListener('submit', savePlaylistEdit);
 $('#playlistPickCover')?.addEventListener('click', async () => {
-  const picked = await window.orangeDesktop?.pickImage?.();
-  if (!picked) return;
-  const saved = await window.orangeDesktop?.saveImageAsCover?.(picked);
-  if (!saved) {
-    showToast('封面保存失败');
-    return;
-  }
+  const saved = await chooseCoverImage();
+  if (!saved) return;
   editingPlaylistCover = saved;
   $('#playlistEditCover').src = saved;
 });
@@ -3991,7 +5352,7 @@ function bindSettingsControls() {
   }
 
   bindSwitch('#replayGainToggle', 'replayGain', () => applyReplayGain(getTrack(state.currentId)));
-  bindSwitch('#eqToggle', 'eqEnabled', () => applyEq());
+  bindSwitch('#eqToggle', 'eqEnabled', () => { applyEq(); syncEqHeadphoneHint(); });
   bindSwitch('#autoScanToggle', 'autoScanOnStart');
   bindSwitch('#minimizeToTrayToggle', 'minimizeToTray', syncWindowBehavior);
   bindSwitch('#closeToTrayToggle', 'closeToTray', syncWindowBehavior);
@@ -4020,15 +5381,29 @@ function bindSettingsControls() {
 
   const preset = $('#eqPreset');
   if (preset) {
-    preset.value = state.prefs.eqPreset || 'flat';
+    // 先把「我的预设」那组选项铺好，再设 value：
+    // 顺序反过来的话，value 会被设成一个还不存在的 custom:<id>，下拉回落成第一项
+    renderEqPresetOptions();
+    preset.value = currentEqPresetValue();
     preset.addEventListener('change', () => {
-      state.prefs.eqPreset = preset.value;
-      //「自定义」取用户存档；其余取内置预设表
-      state.prefs.eqGains = preset.value === 'custom'
-        ? normalizedCustomEq()
-        : [...(EQ_PRESETS[preset.value] || EQ_PRESETS.flat)];
+      const value = preset.value;
+      state.prefs.eqPreset = value;
+      // 主动选了预设 = 放弃耳机校正曲线，按钮跟着回到「未校正」
+      state.prefs.eqHeadphone = '';
+      state.prefs.eqPreamp = 0;
+      syncEqHeadphoneTrigger();
+      //「自定义」取用户存档，「custom:<id>」取命名预设，其余取内置预设表
+      const custom = customPresetByValue(value);
+      state.prefs.eqGains = custom
+        ? EQ_BANDS.map((_, index) => roundToStep(custom.gains[index] || 0))
+        : value === 'custom'
+          ? normalizedCustomEq()
+          : [...(EQ_PRESETS[value] || EQ_PRESETS.flat)];
+      if (custom) state.prefs.eqPreamp = Number(custom.preamp) || 0;
       applyEq();
       renderEqSliders();
+      syncEqHeadphoneHint();
+      syncEqPresetButtons();
       savePrefs();
     });
   }
@@ -4049,10 +5424,14 @@ function bindSettingsControls() {
       if (toggle) toggle.checked = true;
       syncEqBandValue(slider, value);
       applyEq();
+      // 拖过滑块后 hint 要变成「已在曲线上手动微调」，不然会以为还是原厂曲线
+      syncEqHeadphoneHint();
       savePrefs();
     });
   });
-  initEqCustomSave(preset);
+  initEqPresets();
+  initOutputDevice();
+  initEqHeadphone();
   renderEqSliders();
   $('#addWatchFolder')?.addEventListener('click', addWatchFolder);
   renderWatchList();
@@ -4082,9 +5461,22 @@ function bindRange(selector, key, format, onChange, options = {}) {
 
 /** 把滑块当前值写到它上方的 <output>；非 0 时加 is-active 标红，一眼看出哪些频段调过 */
 function syncEqBandValue(slider, value) {
+  const number = Number(value) || 0;
+  // 轨道填充跟着实际增益走：从中线（0 dB）向上/向下生长。
+  // 只靠 CSS 静态渐变的话，0 dB 也是满上半截红，看着像十段全推满了。
+  const min = Number(slider.min) || -12;
+  const max = Number(slider.max) || 12;
+  const span = max - min;
+  if (span > 0) {
+    const ratio = (number - min) / span;        // 0=最低 1=最高
+    const center = (0 - min) / span;            // 0 dB 在轨道上的位置
+    const up = number > 0 ? (ratio - center) * 100 : 0;
+    const down = number < 0 ? (center - ratio) * 100 : 0;
+    slider.style.setProperty('--eq-up', `${up.toFixed(3)}%`);
+    slider.style.setProperty('--eq-down', `${down.toFixed(3)}%`);
+  }
   const output = slider.closest('.eq-band')?.querySelector('.eq-value');
   if (!output) return;
-  const number = Number(value) || 0;
   output.textContent = formatEqDb(number);
   output.classList.toggle('is-active', number !== 0);
 }
@@ -4099,29 +5491,258 @@ function renderEqSliders() {
   });
 }
 
-/**
- * 「保存当前设置」按钮：把当前十段增益存进 eqCustom，并把预设切到「自定义」。
- * 存档和当前值分开存，所以之后随便切别的预设、再切回「自定义」都能找回来。
- */
-function initEqCustomSave(presetSelect) {
-  const button = $('#eqSaveCustom');
-  if (!button) return;
-  const label = button.textContent;
-  let timer = 0;
-  button.addEventListener('click', () => {
-    state.prefs.eqCustom = normalizedEqGains();
-    state.prefs.eqPreset = 'custom';
-    if (presetSelect) presetSelect.value = 'custom';
-    savePrefs();
-    // 轻量反馈：按钮短暂变成「已保存」，不弹窗打断操作
-    button.textContent = '已保存';
-    button.disabled = true;
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      button.textContent = label;
-      button.disabled = false;
-    }, 1200);
+/* --------------------------- 均衡预设：我的预设 --------------------------- */
+
+const EQ_PRESET_LABELS = {
+  flat: '原声', pop: '流行', rock: '摇滚', classical: '古典', vocal: '人声',
+  bass: '低音增强', treble: '高音增强', jazz: '爵士', electronic: '电子', custom: '自定义'
+};
+
+function eqCustomPresets() {
+  return Array.isArray(state.prefs.eqPresets)
+    ? state.prefs.eqPresets.filter(item => item && item.id && item.name && Array.isArray(item.gains))
+    : [];
+}
+
+/** 下拉里「我的预设」用 custom:<id> 表示，和内置预设的裸 key 区分开 */
+function customPresetByValue(value) {
+  const text = String(value || '');
+  if (!text.startsWith('custom:')) return null;
+  return eqCustomPresets().find(item => item.id === text.slice(7)) || null;
+}
+
+/** 当前选中的预设值（找不到对应自定义项时退回内置的「自定义」） */
+function currentEqPresetValue() {
+  const value = String(state.prefs.eqPreset || 'flat');
+  if (value.startsWith('custom:')) return customPresetByValue(value) ? value : 'custom';
+  return EQ_PRESETS[value] ? value : 'flat';
+}
+
+function renderEqPresetOptions() {
+  const select = $('#eqPreset');
+  if (!select) return;
+  // 重建 optgroup 会把当前选中的 option 一起换掉，浏览器随即把选中项重置成第一项。
+  // 先记下来，铺完选项再按原值恢复。
+  const previous = select.value;
+  const items = eqCustomPresets();
+  let group = $('#eqPresetMine');
+  // 一条自定义都没有时整组移除：空 optgroup 会留下一个孤零零的分组标题
+  if (!items.length) {
+    group?.remove();
+    return;
+  }
+  if (!group) {
+    group = document.createElement('optgroup');
+    group.id = 'eqPresetMine';
+    group.label = '我的预设';
+    select.appendChild(group);
+  }
+  group.innerHTML = items
+    .map(item => `<option value="custom:${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`)
+    .join('');
+  if (previous && [...select.options].some(option => option.value === previous)) {
+    select.value = previous;
+  }
+}
+
+function syncEqPresetButtons() {
+  const remove = $('#eqDeletePreset');
+  if (remove) remove.hidden = !customPresetByValue(currentEqPresetValue());
+}
+
+function applyEqPresetGains(gains, preamp) {
+  state.prefs.eqGains = EQ_BANDS.map((_, index) => roundToStep(gains[index] || 0));
+  state.prefs.eqPreamp = Number(preamp) || 0;
+  state.prefs.eqEnabled = true;
+  const toggle = $('#eqToggle');
+  if (toggle) toggle.checked = true;
+  applyEq();
+  renderEqSliders();
+  syncEqHeadphoneHint();
+  savePrefs();
+}
+
+/** 把当前曲线存成一个命名预设；同名视为覆盖 */
+async function saveEqPresetFlow() {
+  const value = currentEqPresetValue();
+  const current = customPresetByValue(value);
+  const name = await askText({
+    title: '保存均衡预设',
+    hint: '给这套曲线起个名字，之后可以从「预设」下拉里选回',
+    value: current?.name || ''
   });
+  if (!name) return;
+  const gains = normalizedEqGains().map(roundToStep);
+  const list = eqCustomPresets().slice();
+  const same = list.find(item => item.name.toLowerCase() === name.toLowerCase());
+  const id = same?.id || `eqp${Date.now().toString(36)}`;
+  const entry = { id, name, gains, preamp: Number(state.prefs.eqPreamp) || 0, savedAt: Date.now() };
+  if (same) list[list.indexOf(same)] = entry;
+  else list.push(entry);
+  state.prefs.eqPresets = list;
+  state.prefs.eqPreset = `custom:${id}`;
+  // 旧的「自定义存档」也同步一份，老版本读到的仍是同一套曲线
+  state.prefs.eqCustom = [...gains];
+  renderEqPresetOptions();
+  const select = $('#eqPreset');
+  if (select) select.value = `custom:${id}`;
+  syncEqPresetButtons();
+  savePrefs();
+  showToast(same ? `已更新预设「${name}」` : `已保存预设「${name}」`);
+}
+
+async function exportEqPresetFlow() {
+  const desktop = window.orangeDesktop;
+  if (!desktop?.saveEqPreset) {
+    showToast('当前环境不支持导出');
+    return;
+  }
+  const value = currentEqPresetValue();
+  const current = customPresetByValue(value);
+  const name = current?.name || EQ_PRESET_LABELS[value] || '自定义';
+  const gains = normalizedEqGains().map(roundToStep);
+  const payload = {
+    app: 'Orange Music',
+    type: 'eq-preset',
+    version: 1,
+    name,
+    preamp: Number(state.prefs.eqPreamp) || 0,
+    // gains 是 31Hz ~ 16kHz 十段；bands 带上频率，别的工具导入时不至于靠猜
+    bands: EQ_BANDS.map((hz, index) => ({ hz, gain: gains[index] })),
+    gains,
+    headphones: findAutoEqModel(state.prefs.eqHeadphone)?.name || ''
+  };
+  const saved = await desktop.saveEqPreset({ name, content: JSON.stringify(payload, null, 2) }).catch(() => null);
+  showToast(saved ? '预设已导出' : '已取消导出');
+}
+
+/**
+ * 解析导入文件。三种来源：
+ *   1. 本播放器导出的 JSON
+ *   2. EqualizerAPO 的 Filter 行（Filter: ON PK Fc 105 Hz Gain -7.33 dB Q 0.7）
+ *   3. EqualizerAPO 的 GraphicEQ 行（GraphicEQ: 31 4.5; 62 3.2; ...）
+ * 后两种按「对数频率最近」映射到十段，和 AutoEq 的 FixedBandEQ 是同一套算法口径。
+ */
+function parseEqPresetText(text, fallbackName) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    try {
+      const data = JSON.parse(raw);
+      const source = Array.isArray(data) ? data : (Array.isArray(data?.gains) ? data.gains : null);
+      if (!source) return null;
+      return {
+        name: String(data?.name || fallbackName || '导入的预设').slice(0, 30),
+        gains: EQ_BANDS.map((_, index) => roundToStep(Number(source[index]) || 0)),
+        preamp: Number(data?.preamp) || 0
+      };
+    } catch {
+      return null;
+    }
+  }
+  const lines = raw.split(/\r?\n/);
+  let preamp = 0;
+  const summed = EQ_BANDS.map(() => 0);
+  const filled = EQ_BANDS.map(() => 0);
+  let hits = 0;
+  const bandIndexFor = hz => {
+    const target = Math.log(Math.max(20, Number(hz) || 1000));
+    let best = 0;
+    let bestDiff = Infinity;
+    EQ_BANDS.forEach((freq, index) => {
+      const diff = Math.abs(Math.log(freq) - target);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = index;
+      }
+    });
+    return best;
+  };
+  for (const line of lines) {
+    const pre = line.match(/^\s*Preamp:\s*(-?[\d.]+)\s*dB/i);
+    if (pre) preamp = Number(pre[1]) || 0;
+    const filter = line.match(/Filter:\s*ON\s+\w+\s+Fc\s+([\d.]+)\s*Hz[^G]*Gain\s+(-?[\d.]+)\s*dB/i);
+    if (filter) {
+      const index = bandIndexFor(filter[1]);
+      summed[index] += Number(filter[2]) || 0;
+      filled[index] += 1;
+      hits += 1;
+      continue;
+    }
+    const graphic = line.match(/GraphicEQ:\s*(.+)$/i);
+    if (graphic) {
+      for (const pair of graphic[1].split(';')) {
+        const [hz, gain] = pair.trim().split(/\s+/);
+        if (!hz || gain === undefined) continue;
+        const index = bandIndexFor(hz);
+        summed[index] += Number(gain) || 0;
+        filled[index] += 1;
+        hits += 1;
+      }
+    }
+  }
+  if (!hits) return null;
+  return {
+    name: String(fallbackName || '导入的预设').slice(0, 30),
+    // 多个滤波器落到同一段时取平均，避免 8 段全叠到 16k 上变成 +30dB
+    gains: summed.map((sum, index) => roundToStep(filled[index] ? sum / filled[index] : 0)),
+    preamp
+  };
+}
+
+async function importEqPresetFlow() {
+  const desktop = window.orangeDesktop;
+  if (!desktop?.openEqPreset) {
+    showToast('当前环境不支持导入');
+    return;
+  }
+  const file = await desktop.openEqPreset().catch(() => null);
+  if (!file) return;
+  const parsed = parseEqPresetText(file.text, file.name);
+  if (!parsed) {
+    showToast('这个文件里没有可识别的均衡参数');
+    return;
+  }
+  const id = `eqp${Date.now().toString(36)}`;
+  const list = eqCustomPresets().slice();
+  list.push({ id, name: parsed.name, gains: parsed.gains, preamp: parsed.preamp, savedAt: Date.now() });
+  state.prefs.eqPresets = list;
+  state.prefs.eqPreset = `custom:${id}`;
+  renderEqPresetOptions();
+  const select = $('#eqPreset');
+  if (select) select.value = `custom:${id}`;
+  applyEqPresetGains(parsed.gains, parsed.preamp);
+  syncEqPresetButtons();
+  showToast(`已导入预设「${parsed.name}」`);
+}
+
+function deleteEqPresetFlow() {
+  const value = currentEqPresetValue();
+  const current = customPresetByValue(value);
+  if (!current) return;
+  if (!window.confirm(`删除预设「${current.name}」？当前十段增益不会被重置。`)) return;
+  state.prefs.eqPresets = eqCustomPresets().filter(item => item.id !== current.id);
+  state.prefs.eqPreset = 'custom';
+  state.prefs.eqCustom = normalizedEqGains();
+  const select = $('#eqPreset');
+  renderEqPresetOptions();
+  if (select) select.value = 'custom';
+  syncEqPresetButtons();
+  savePrefs();
+  showToast(`已删除预设「${current.name}」`);
+}
+
+/**
+ * 「我的预设」相关按钮：保存 / 导入 / 导出 / 删除。
+ * 以前这里只有一个「保存当前设置」，存下来的曲线没法命名、也没法带走。
+ */
+function initEqPresets() {
+  renderEqPresetOptions();
+  syncEqPresetButtons();
+  $('#eqSaveCustom')?.addEventListener('click', () => { saveEqPresetFlow(); });
+  $('#eqImportPreset')?.addEventListener('click', () => { importEqPresetFlow(); });
+  $('#eqExportPreset')?.addEventListener('click', () => { exportEqPresetFlow(); });
+  $('#eqDeletePreset')?.addEventListener('click', () => { deleteEqPresetFlow(); });
 }
 
 // ---------- 歌词时间微调（右键菜单，按歌曲记忆） ----------
@@ -4147,7 +5768,6 @@ function formatOffset(value) {
 // ============================================================
 
 let desktopLyricsOpen = false;
-let lastDesktopLyricsPush = 0;
 
 /** 组装当前外观配置并推给桌面歌词窗口 */
 function pushDesktopLyricsConfig() {
@@ -4177,6 +5797,10 @@ function pushDesktopLyricsConfig() {
  * 歌词窗打开时回拉到的就是空歌词（表现为首次打开不显示、切歌才出现）。歌词几百行文本
  * 每秒 4 次 IPC 开销可忽略，正确性优先。
  */
+// 上一次推送的歌词指纹：timeupdate 每秒约 4 次，歌词只在换歌/内容变化时才需要
+// 跨进程结构化克隆一遍整个数组（窗口没开时更是纯浪费）。其余字段照常推。
+let lastPushedLyricsKey = '';
+
 function pushDesktopLyricsState() {
   // 不检查 desktopLyricsOpen：窗口可能由托盘直接打开，此时主窗口的
   // desktopLyricsOpen 标志还没同步，检查会漏掉推送导致「不显示歌词」。
@@ -4184,7 +5808,7 @@ function pushDesktopLyricsState() {
   if (!window.orangeDesktop?.sendDesktopLyricsState) return;
   const track = getTrack(state.currentId);
   const lyrics = track ? getLyrics(track) : [];
-  window.orangeDesktop.sendDesktopLyricsState({
+  const payload = {
     // 带上曲目 id：歌词窗据此判断「换歌了」，切到无歌词的歌时不会继续显示上一首
     id: track ? track.id : '',
     playing: state.playing,
@@ -4192,12 +5816,30 @@ function pushDesktopLyricsState() {
     title: track ? track.title : '',
     artist: track ? track.artist : '',
     shuffle: Boolean(state.shuffle),
-    repeat: Number(state.repeat) || 0,
-    lyrics
-  });
+    repeat: Number(state.repeat) || 0
+  };
+  // 指纹和桌面歌词窗口那边的判断口径保持一致：曲目 + 行数 + 首尾时间
+  const key = track
+    ? `${track.id}|${lyrics.length}|${lyrics[0] ? lyrics[0].time : ''}|${lyrics.length ? lyrics[lyrics.length - 1].time : ''}`
+    : '';
+  if (key !== lastPushedLyricsKey) {
+    lastPushedLyricsKey = key;
+    payload.lyrics = lyrics;
+  }
+  window.orangeDesktop.sendDesktopLyricsState(payload);
 }
 
 /** 切换桌面歌词窗口的显示状态，返回是否已打开 */
+/** 桌面歌词开着的时候按钮要亮起来：原来只有开 / 关两个动作，按钮永远是灰的，
+    用户没法知道现在到底开没开（也可能在任务栏里找半天那块浮窗）。 */
+function syncDesktopLyricsButton() {
+  const button = $('#desktopLyricsButton');
+  if (!button) return;
+  button.classList.toggle('active', desktopLyricsOpen);
+  button.setAttribute('aria-pressed', desktopLyricsOpen ? 'true' : 'false');
+  button.title = desktopLyricsOpen ? '关闭桌面歌词' : '桌面歌词（置顶悬浮窗）';
+}
+
 async function toggleDesktopLyrics(open) {
   if (!window.orangeDesktop?.toggleDesktopLyrics) {
     showToast('当前环境不支持桌面歌词');
@@ -4205,6 +5847,7 @@ async function toggleDesktopLyrics(open) {
   }
   const target = open !== undefined ? open : !desktopLyricsOpen;
   desktopLyricsOpen = await window.orangeDesktop.toggleDesktopLyrics(target);
+  syncDesktopLyricsButton();
   if (desktopLyricsOpen) {
     // 窗口刚创建，先下发一次配置，再推一次当前状态
     pushDesktopLyricsConfig();
@@ -4219,6 +5862,96 @@ async function toggleDesktopLyrics(open) {
   }
   return desktopLyricsOpen;
 }
+
+/* ==========================================================================
+   迷你播放器小窗
+   —— 主窗口只做两件事：定时把状态推过去，把那边点出来的操作翻译成本地调用。
+   ========================================================================== */
+let miniPlayerOpen = false;
+let miniStateTimer = 0;
+
+/** 小窗要的那点信息，字段尽量短：200ms 一次，别整对象往外扔 */
+function miniStateSnapshot() {
+  const track = getTrack(state.currentId);
+  const duration = Number(audio.duration) || Number(track?.duration) || 0;
+  const time = Number(audio.currentTime) || 0;
+  const active = resolveActiveLyric();
+  return {
+    title: track?.title || '',
+    artist: track?.artist || '',
+    cover: track ? hiResCover(track.cover) : '',
+    lyric: active ? (active.lyrics[active.active]?.text || '') : '',
+    playing: !audio.paused && !audio.ended,
+    progress: duration > 0 ? Math.round((time / duration) * 1000) : 0,
+    time,
+    duration
+  };
+}
+
+function pushMiniState() {
+  if (!miniPlayerOpen) return;
+  window.orangeDesktop?.pushMiniState?.(miniStateSnapshot());
+}
+
+function startMiniHeartbeat() {
+  stopMiniHeartbeat();
+  // 200ms 够跟手，又不会让 IPC 忙起来（timeupdate 本身约 250ms 一次）
+  miniStateTimer = setInterval(pushMiniState, 200);
+}
+
+function stopMiniHeartbeat() {
+  if (miniStateTimer) clearInterval(miniStateTimer);
+  miniStateTimer = 0;
+}
+
+function syncMiniButton(open) {
+  miniPlayerOpen = Boolean(open);
+  const button = $('#miniPlayerButton');
+  if (!button) return;
+  button.classList.toggle('active', miniPlayerOpen);
+  button.setAttribute('aria-pressed', String(miniPlayerOpen));
+  button.title = miniPlayerOpen ? '关闭迷你播放器' : '迷你播放器（桌面小窗）';
+}
+
+async function toggleMiniWindow(open) {
+  if (!window.orangeDesktop?.toggleMiniPlayer) {
+    showToast('当前环境不支持迷你播放器');
+    return false;
+  }
+  const target = open !== undefined ? open : !miniPlayerOpen;
+  const nowOpen = await window.orangeDesktop.toggleMiniPlayer(target);
+  syncMiniButton(nowOpen);
+  if (nowOpen) {
+    pushMiniState();
+    startMiniHeartbeat();
+  } else {
+    stopMiniHeartbeat();
+  }
+  return nowOpen;
+}
+
+function seekToRatio(ratio) {
+  const duration = Number(audio.duration);
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  const value = Math.max(0, Math.min(1, Number(ratio) || 0));
+  audio.currentTime = value * duration;
+  updateProgress();
+  pushMiniState();
+}
+
+// 小窗关闭（自己点的 ✕、或者跟着主窗口一起销毁）时把心跳停掉
+window.orangeDesktop?.onMiniClosed?.(() => {
+  syncMiniButton(false);
+  stopMiniHeartbeat();
+});
+
+window.orangeDesktop?.onMiniCommand?.(command => {
+  if (!command) return;
+  if (command === 'toggle') togglePlayback();
+  else if (command === 'prev') previousTrack();
+  else if (command === 'next') nextTrack();
+  else if (typeof command === 'object' && command.type === 'seek') seekToRatio(command.value);
+});
 
 function openLyricMenu(x, y) {
   const menu = $('#lyricMenu');
@@ -4408,7 +6141,9 @@ function absoluteCoverUrl(cover) {
 }
 
 async function applyCoverAccent(cover) {
-  const url = absoluteCoverUrl(cover);
+  // 默认占位封面是品牌橙图标：拿它采样会把整个播放页染成一片土黄，
+  // 而且它不含任何专辑信息。占位图直接跳过，回到默认氛围色。
+  const url = (!cover || cover === DEFAULT_COVER) ? '' : absoluteCoverUrl(cover);
   const nodes = [$('#fullPlayer'), document.body, document.documentElement].filter(Boolean);
   if (!url) {
     coverAccentUrl = '';
@@ -5167,7 +6902,8 @@ const SHORTCUT_ACTIONS = {
   queue: '播放队列',
   shuffle: '随机播放',
   repeat: '切换循环模式',
-  search: '搜索'
+  search: '搜索',
+  fullscreen: '窗口全屏'
 };
 
 function renderShortcutRows() {
@@ -5270,14 +7006,25 @@ function openEditModal(id) {
   $('#editModal').showModal();
 }
 
-async function pickEditCover() {
+/**
+ * 统一的「选一张图当封面」流程：弹系统选图 → 存进封面目录 → 返回可用地址。
+ * 用户取消、或保存失败（已 toast）都返回 null。
+ * 歌曲封面和歌单封面原来各写一遍这段一模一样的代码。
+ */
+async function chooseCoverImage() {
   const picked = await window.orangeDesktop?.pickImage?.();
-  if (!picked) return;
+  if (!picked) return null;
   const saved = await window.orangeDesktop?.saveImageAsCover?.(picked);
   if (!saved) {
     showToast('封面保存失败');
-    return;
+    return null;
   }
+  return saved;
+}
+
+async function pickEditCover() {
+  const saved = await chooseCoverImage();
+  if (!saved) return;
   editingCoverUrl = saved;
   $('#editCoverPreview').src = saved;
 }
@@ -5893,6 +7640,14 @@ function initSettings() {
   bindAmbientPower();
   // 双语歌词：默认只显示原文，打开后连译文一起显示
   bindSwitch('#lyricTranslationToggle', 'lyricTranslation', applyLyricTranslation);
+  // 关掉后再打开：之前判定「查过了没歌词」的标记要清掉，否则这首永远不重试
+  bindSwitch('#lrclibToggle', 'lrclib', enabled => {
+    if (!enabled) return;
+    for (const song of [...state.songs, ...state.online]) {
+      if (song._lyricSource === 'lrclib' || song._lyricSource === 'lrclib-plain') continue;
+      song._lyrclibTried = false;
+    }
+  });
   bindRange('#tiltAngle', 'tiltAngle', value => `${value}°`, () => {
     applyTiltEffect();
     savePrefs();
@@ -6015,6 +7770,7 @@ function initDesktopLyricsControls() {
       state.prefs.desktopLyrics = false;
       savePrefs();
       syncDesktopLyricsToggle();
+      syncDesktopLyricsButton();
     });
   }
   // 悬浮窗点「设置」时，跳到设置页并定位到桌面歌词区块
@@ -6135,8 +7891,11 @@ async function bootstrap() {
 
   applyVolume();
   document.title = '';
+  bindWindowControls();
   renderAll();
   updatePlayerUi();
+  // 系统媒体控制：注册锁屏 / 音量弹窗 / 媒体键的回调（updatePlayerUi 里已经推过一次曲目信息）
+  initMediaSession();
 
   const currentTrack = getTrack(state.currentId);
   if (currentTrack && !getLyrics(currentTrack).length && currentTrack._path) {
@@ -6156,6 +7915,7 @@ async function bootstrap() {
   applyPlaybackRate();
   applyEq();
   applyReplayGain(getTrack(state.currentId));
+  updateKaraokeUi();
   initTitleBar();
   setTitleBarTone('main');
   initAutoScrollbar();

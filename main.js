@@ -8,7 +8,11 @@ const fsNode = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { pathToFileURL } = require('url');
+const { pathToFileURL, fileURLToPath } = require('url');
+const https = require('https');
+
+// LRCLIB 请求超时：补歌词是锦上添花，超过 6 秒就当没有，不能拖住播放
+const LRCLIB_TIMEOUT_MS = 6000;
 
 // 标签 / 歌词解析与渲染进程共用同一份实现，避免两边各写一套（主进程负责自动扫描时用）
 const tags = require('./renderer/tags.js');
@@ -26,6 +30,8 @@ try {
 
 const appIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'app.ico'));
 const TITLE_BAR_HEIGHT = 52;
+/** 窗口标题（任务栏 / Alt+Tab / 悬停预览显示的名字），打包后跟 productName 一致 */
+const APP_TITLE = 'Orange Music';
 
 /** @type {BrowserWindow | null} 主窗口（关闭后置空） */
 let mainWindow = null;
@@ -329,6 +335,53 @@ ipcMain.on('window-minimize', event => {
   windowFor(event)?.minimize();
 });
 
+ipcMain.on('window-close', event => {
+  windowFor(event)?.close();
+});
+
+/**
+ * 窗口全屏（F11 / 播放页右上角按钮）。
+ *
+ * 和渲染层里那个「全屏播放页」是两回事：那个只是把歌词页铺满窗口，
+ * 窗口本身还有标题栏和任务栏；这里是让窗口真的占满整块屏幕。
+ */
+ipcMain.on('window-toggle-fullscreen', event => {
+  const win = windowFor(event);
+  if (!win) return;
+  win.setFullScreen(!win.isFullScreen());
+});
+
+/** 渲染层初始化时补一次当前状态：全屏状态下重载页面（Ctrl+R）按钮图标不能错 */
+ipcMain.handle('window-get-fullscreen', event => Boolean(windowFor(event)?.isFullScreen()));
+
+/**
+ * 把全屏状态同步给渲染层，按钮图标 / 布局都靠它翻牌。
+ *
+ * 状态直接由事件给出，不再回查 win.isFullScreen()：Windows 上这两个事件
+ * 有可能早于窗口状态真正落定，回查会读到 false，把刚加上的全屏样式又抹掉。
+ */
+function bindFullscreenEvents(win) {
+  const notify = value => {
+    if (win.isDestroyed()) return;
+    win.webContents.send('window-fullscreen-changed', Boolean(value));
+  };
+  win.on('enter-full-screen', () => notify(true));
+  win.on('leave-full-screen', () => notify(false));
+}
+
+/** 自绘的「最大化 / 还原」按钮要跟着窗口状态换图标 */
+function bindMaximizeEvents(win) {
+  const notify = value => {
+    if (win.isDestroyed()) return;
+    win.webContents.send('window-maximized-changed', Boolean(value));
+  };
+  win.on('maximize', () => notify(true));
+  win.on('unmaximize', () => notify(false));
+  win.on('enter-full-screen', () => notify(false));
+}
+
+ipcMain.handle('window-get-maximized', event => Boolean(windowFor(event)?.isMaximized()));
+
 /** 封面落盘目录（userData/covers），不存在时自动创建 */
 function coversDir() {
   const dir = path.join(app.getPath('userData'), 'covers');
@@ -391,6 +444,34 @@ ipcMain.handle('cover-thumbnail', (_event, filePath) => {
 
 ipcMain.handle('path-exists', (_event, filePath) => Boolean(filePath && fsNode.existsSync(filePath)));
 
+/* 系统媒体控制（SMTC）的封面：渲染层拿 file:// 图去画 canvas 会被当成跨源，
+   toDataURL 直接抛 SecurityError，锁屏 / 音量弹窗里就一直没有封面。
+   这里用 nativeImage 读同一个文件（不受页面同源策略约束），
+   居中裁成正方形再压到目标尺寸，返回 data URL 给 MediaMetadata 用。 */
+ipcMain.handle('cover-data-url', (_event, source, size) => {
+  try {
+    if (!source) return null;
+    let filePath = String(source);
+    if (/^file:/i.test(filePath)) filePath = fileURLToPath(filePath);
+    if (!fsNode.existsSync(filePath)) return null;
+    const image = nativeImage.createFromPath(filePath);
+    if (image.isEmpty()) return null;
+    const target = Math.max(64, Math.min(1024, Math.round(Number(size) || 256)));
+    const { width, height } = image.getSize();
+    const side = Math.min(width, height);
+    if (!side) return null;
+    const squared = image.crop({
+      x: Math.max(0, Math.round((width - side) / 2)),
+      y: Math.max(0, Math.round((height - side) / 2)),
+      width: Math.round(side),
+      height: Math.round(side)
+    });
+    return squared.resize({ width: target, height: target, quality: 'best' }).toDataURL();
+  } catch (error) {
+    return null;
+  }
+});
+
 // 读取一首歌的歌词：优先内嵌标签，其次同名 .lrc
 ipcMain.handle('read-lyrics', async (_event, filePath) => {
   if (!filePath || !fsNode.existsSync(filePath)) return null;
@@ -441,6 +522,113 @@ ipcMain.handle('read-sidecar-lyrics', (_event, audioPath) => {
   if (!audioPath || !fsNode.existsSync(audioPath)) return null;
   return readSidecarFor(audioPath);
 });
+
+/* ---------------------------------------------------------------------------
+   LRCLIB 补歌词
+   API 免费、无 key、允许跨域；本地歌没内嵌歌词、同目录也没有 .lrc 时兜底。
+   走主进程而不是渲染层 fetch，是为了绕开页面的 CSP，并且能绕开跨域预检。
+   --------------------------------------------------------------------------- */
+
+function httpsGetJson(url) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, {
+      timeout: LRCLIB_TIMEOUT_MS,
+      // 版本号跟着 package.json 走：写死过一次 1.7.2，结果版本升到 1.8 还在报旧号
+      headers: { 'User-Agent': `OrangeMusic/${app.getVersion()} (desktop player)` }
+    }, response => {
+      // LRCLIB 偶尔会 302 到 CDN，跟着跳一次够用
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        response.resume();
+        httpsGetJson(response.headers.location).then(resolve, reject);
+        return;
+      }
+      if (response.statusCode !== 200) {
+        response.resume();
+        reject(new Error(`HTTP ${response.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      let length = 0;
+      response.on('data', chunk => {
+        length += chunk.length;
+        // 搜索结果正常在几十 KB，超过 2MB 一定是异常响应
+        if (length > 2 * 1024 * 1024) {
+          request.destroy(new Error('response too large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.on('timeout', () => request.destroy(new Error('timeout')));
+    request.on('error', reject);
+  });
+}
+
+/** 候选里挑「歌名 + 歌手 + 时长」最接近的一条：同名翻唱、现场版太多，只靠标题会拿错 */
+function pickLrclibCandidate(list, wanted) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const norm = value => String(value || '').toLowerCase().replace(/[\s\-_·.,()（）\[\]]/g, '');
+  const wantedTitle = norm(wanted.title);
+  const wantedArtist = norm(wanted.artist);
+  let best = null;
+  let bestScore = -Infinity;
+  for (const item of list) {
+    let score = 0;
+    if (norm(item.trackName) === wantedTitle) score += 4;
+    else if (norm(item.trackName).includes(wantedTitle) || wantedTitle.includes(norm(item.trackName))) score += 1;
+    if (wantedArtist && norm(item.artistName) === wantedArtist) score += 3;
+    else if (wantedArtist && norm(item.artistName).includes(wantedArtist)) score += 1;
+    if (item.syncedLyrics) score += 2;
+    // 时长差 3 秒内满分，超过 15 秒基本可以排除
+    const diff = Math.abs(Number(item.duration) - Number(wanted.duration));
+    if (Number.isFinite(diff)) score += diff <= 3 ? 3 : diff <= 15 ? 1 : -3;
+    if (score > bestScore) {
+      bestScore = score;
+      best = item;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+ipcMain.handle('lrclib-lyrics', async (_event, query) => {
+  const wanted = {
+    title: String(query?.title || '').trim(),
+    artist: String(query?.artist || '').trim(),
+    album: String(query?.album || '').trim(),
+    duration: Number(query?.duration) || 0
+  };
+  if (!wanted.title) return null;
+  const params = new URLSearchParams({ track_name: wanted.title });
+  // 歌手名里常见 "A / B"、"A feat. B"，整串发过去会查不到，只取第一段
+  const primaryArtist = wanted.artist.split(/\s*[/,、&]\s*|\s+feat\.?\s+/i)[0].trim();
+  if (primaryArtist) params.set('artist_name', primaryArtist);
+  if (wanted.album) params.set('album_name', wanted.album);
+  try {
+    const list = await httpsGetJson(`https://lrclib.net/api/search?${params.toString()}`);
+    const best = pickLrclibCandidate(list, wanted);
+    if (!best) return null;
+    return {
+      synced: best.syncedLyrics || '',
+      plain: best.plainLyrics || '',
+      trackName: best.trackName || '',
+      artistName: best.artistName || '',
+      albumName: best.albumName || '',
+      duration: Number(best.duration) || 0,
+      instrumental: Boolean(best.instrumental)
+    };
+  } catch (error) {
+    // 网络不通 / 接口抽风都当「没找到」，绝不能因为补歌词把播放卡住
+    return null;
+  }
+});
+
 
 /**
  * 调用随包的 ffmpeg。
@@ -626,8 +814,7 @@ ipcMain.handle('save-m3u', async (event, payload) => {
   }
 });
 
-ipcMain.handle('open-m3u', async (event) => {
-  const win = windowFor(event) || mainWindow;
+ipcMain.handle('open-m3u', async (event) => {  const win = windowFor(event) || mainWindow;
   const result = await dialog.showOpenDialog(win, {
     title: '导入歌单',
     properties: ['openFile'],
@@ -643,6 +830,48 @@ ipcMain.handle('open-m3u', async (event) => {
       .filter(line => line && !line.startsWith('#'))
       .map(line => (path.isAbsolute(line) ? line : path.resolve(dir, line)));
     return { name: path.basename(filePath, path.extname(filePath)), entries };
+  } catch (error) {
+    return null;
+  }
+});
+
+// 均衡器预设导出 / 导入：走系统文件对话框，浏览器式下载在 Electron 里会静默存到下载目录，
+// 用户根本不知道文件去哪了
+ipcMain.handle('save-eq-preset', async (event, payload) => {
+  const win = windowFor(event) || mainWindow;
+  const safeName = String((payload && payload.name) || 'eq-preset')
+    .replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 60) || 'eq-preset';
+  const result = await dialog.showSaveDialog(win, {
+    title: '导出均衡预设',
+    defaultPath: `${safeName}.json`,
+    filters: [{ name: '均衡预设', extensions: ['json'] }]
+  });
+  if (result.canceled || !result.filePath) return null;
+  try {
+    fsNode.writeFileSync(result.filePath, String((payload && payload.content) || ''), 'utf8');
+    return result.filePath;
+  } catch (error) {
+    return null;
+  }
+});
+
+ipcMain.handle('open-eq-preset', async (event) => {
+  const win = windowFor(event) || mainWindow;
+  const result = await dialog.showOpenDialog(win, {
+    title: '导入均衡预设',
+    properties: ['openFile'],
+    filters: [
+      { name: '均衡预设 / EqualizerAPO 参数', extensions: ['json', 'txt', 'apo'] },
+      { name: '所有文件', extensions: ['*'] }
+    ]
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  try {
+    const filePath = result.filePaths[0];
+    return {
+      name: path.basename(filePath, path.extname(filePath)),
+      text: decodeTextBuffer(fsNode.readFileSync(filePath))
+    };
   } catch (error) {
     return null;
   }
@@ -838,6 +1067,144 @@ function closeDesktopLyricsWindow() {
   sendToRenderer('desktop-lyrics-closed');
 }
 
+/* ==========================================================================
+   迷你播放器（桌面小窗）
+   —— 透明无边框窗口，玻璃质感全靠 CSS；尺寸固定，位置记忆到 userData。
+   ========================================================================== */
+const MINI_BOUNDS_FILE = 'mini-player-bounds.json';
+const MINI_WIDTH = 384;
+const MINI_HEIGHT = 140;
+let miniPlayerWindow = null;
+/** 主窗口最后一次推来的播放状态：小窗刚打开时补一帧，避免先白一下 */
+let lastMiniState = null;
+let miniBoundsTimer = null;
+
+function readMiniBounds() {
+  try {
+    const file = path.join(app.getPath('userData'), MINI_BOUNDS_FILE);
+    if (!fsNode.existsSync(file)) return null;
+    const data = JSON.parse(fsNode.readFileSync(file, 'utf8'));
+    if (!data || typeof data.x !== 'number' || typeof data.y !== 'number') return null;
+    return { x: Math.round(data.x), y: Math.round(data.y), width: MINI_WIDTH, height: MINI_HEIGHT };
+  } catch (error) {
+    return null;
+  }
+}
+
+function scheduleSaveMiniBounds() {
+  clearTimeout(miniBoundsTimer);
+  miniBoundsTimer = setTimeout(() => {
+    if (!miniPlayerWindow || miniPlayerWindow.isDestroyed()) return;
+    try {
+      const b = miniPlayerWindow.getBounds();
+      fsNode.writeFileSync(path.join(app.getPath('userData'), MINI_BOUNDS_FILE), JSON.stringify(b), 'utf8');
+    } catch (error) {
+      console.warn('save mini-player bounds failed', error);
+    }
+  }, 400);
+}
+
+function createMiniWindow() {
+  if (miniPlayerWindow && !miniPlayerWindow.isDestroyed()) {
+    miniPlayerWindow.show();
+    miniPlayerWindow.focus();
+    return miniPlayerWindow;
+  }
+
+  const win = new BrowserWindow({
+    width: MINI_WIDTH,
+    height: MINI_HEIGHT,
+    show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    // 系统阴影会给透明窗口套一圈方角，投影改用 CSS 自己画
+    hasShadow: false,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    title: `${APP_TITLE} 迷你播放器`,
+    icon: appIcon.isEmpty() ? nativeImage.createEmpty() : appIcon,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+
+  miniPlayerWindow = win;
+  win.setAlwaysOnTop(true, 'floating');
+
+  const saved = readMiniBounds();
+  if (saved && isBoundsOnScreen(saved)) {
+    win.setBounds(saved);
+  } else {
+    const { workArea } = screen.getPrimaryDisplay();
+    win.setBounds({
+      x: Math.round(workArea.x + workArea.width - MINI_WIDTH - 28),
+      y: Math.round(workArea.y + workArea.height - MINI_HEIGHT - 28),
+      width: MINI_WIDTH,
+      height: MINI_HEIGHT
+    });
+  }
+
+  win.loadFile(path.join(__dirname, 'renderer', 'mini.html'));
+
+  win.once('ready-to-show', () => {
+    win.show();
+    if (lastMiniState) win.webContents.send('mini-state', lastMiniState);
+  });
+
+  win.on('moved', scheduleSaveMiniBounds);
+  win.on('closed', () => {
+    miniPlayerWindow = null;
+    sendToRenderer('mini-player-closed');
+  });
+
+  return win;
+}
+
+function closeMiniWindow() {
+  if (miniPlayerWindow && !miniPlayerWindow.isDestroyed()) miniPlayerWindow.close();
+  miniPlayerWindow = null;
+  sendToRenderer('mini-player-closed');
+}
+
+ipcMain.handle('toggle-mini-player', (_event, open) => {
+  const alive = miniPlayerWindow && !miniPlayerWindow.isDestroyed();
+  if (open === false || (open !== true && alive)) {
+    closeMiniWindow();
+    return false;
+  }
+  createMiniWindow();
+  return true;
+});
+
+/** 主窗口推播放状态 → 小窗；顺带缓存一帧给下次打开 */
+ipcMain.on('mini-state', (_event, state) => {
+  lastMiniState = state;
+  if (miniPlayerWindow && !miniPlayerWindow.isDestroyed()) {
+    miniPlayerWindow.webContents.send('mini-state', state);
+  }
+});
+
+/** 小窗上的操作（播放/暂停/上下首/进度）转给主窗口执行 */
+ipcMain.on('mini-command', (_event, command) => {
+  sendToRenderer('mini-command', command);
+});
+
+ipcMain.on('mini-close', () => closeMiniWindow());
+
+ipcMain.on('mini-show-main', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
 /**
  * 把播放状态 / 配置实时推给桌面歌词窗口。
  * 主窗口（渲染进程）每帧 / 每次 timeupdate 都调用，这里只做透传；
@@ -921,8 +1288,13 @@ function stopDesktopLyricsHoverWatch() {
 
 /** 主窗口推送播放状态（时间 / 歌词 / 封面 / 主题色）到桌面歌词窗口 */
 ipcMain.on('desktop-lyrics-state', (_event, state) => {
-  lastDesktopLyricsState = state;
-  sendToDesktopLyrics('desktop-lyrics-state', state);
+  // 渲染层只在「换歌 / 歌词变化」时才带 lyrics，平时只推时间等标量。
+  // 这里做一次合并，保证缓冲的永远是一份完整状态 —— 桌面歌词窗口后开时
+  // 回拉（desktop-lyrics-get-state）仍然拿得到歌词，同时省掉每秒 4 次的整表克隆。
+  lastDesktopLyricsState = lastDesktopLyricsState
+    ? { ...lastDesktopLyricsState, ...state }
+    : state;
+  sendToDesktopLyrics('desktop-lyrics-state', lastDesktopLyricsState);
 });
 
 /** 主窗口推送桌面歌词外观配置（颜色 / 模糊 / 透明 / 字号 / 对齐等） */
@@ -1012,14 +1384,11 @@ function createTray() {
 }
 
 /**
- * 标题栏按钮配色由渲染进程按当前页面深浅决定。
- * 注册在模块级而不是 createWindow 里：窗口重建（macOS activate）时不会重复注册监听，
- * 也不会因为 mainWindow 已被置空而抛错。
+ * 标题栏按钮配色由渲染进程按当前页面深浅决定 —— 这是系统 overlay 时代留下的通道。
+ * 现在标题栏按钮是自绘的（frame:false），这里保留成空实现，
+ * 免得旧渲染层继续调用时在 Electron 里抛「overlay 只支持 hidden 标题栏」。
  */
-ipcMain.on('set-title-bar-overlay', (event, options) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (win && typeof win.setTitleBarOverlay === 'function') win.setTitleBarOverlay(options);
-});
+ipcMain.on('set-title-bar-overlay', () => {});
 
 function createWindow() {
   const windowOptions = {
@@ -1028,10 +1397,15 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 680,
     show: false,
-    titleBarStyle: 'hidden',
-    titleBarOverlay: { color: 'rgba(0,0,0,0)', symbolColor: '#17181b', height: TITLE_BAR_HEIGHT },
+    // 不用系统标题栏，也不用 titleBarOverlay：Windows 的 overlay 关闭按钮悬停时
+    // 是整块鲜红，改不了颜色。自绘三颗按钮，悬停走应用自己的柔和灰。
+    frame: false,
+    // Win11 无边框窗口默认不带阴影，靠这个把窗口从背景里「提」起来
+    hasShadow: true,
+    roundedCorners: true,
     backgroundColor: '#ffffff',
-    title: '',
+    // 任务栏 / 悬停缩略图 / Alt+Tab 显示的名字取自窗口标题，留空会变成一条空白
+    title: APP_TITLE,
     icon: appIcon.isEmpty() ? nativeImage.createEmpty() : appIcon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -1063,15 +1437,16 @@ function createWindow() {
 
   win.on('page-title-updated', event => {
     event.preventDefault();
-    win.setTitle('');
+    // 页面 title 带后缀（Orange Music · 本地音乐播放器），窗口标题固定用应用名
+    win.setTitle(APP_TITLE);
   });
 
   win.once('ready-to-show', () => {
-    if (typeof win.setTitleBarOverlay === 'function') {
-      win.setTitleBarOverlay({ color: 'rgba(0,0,0,0)', symbolColor: '#17181b', height: TITLE_BAR_HEIGHT });
-    }
     win.show();
   });
+
+  bindFullscreenEvents(win);
+  bindMaximizeEvents(win);
 
   // 站外链接一律交给系统浏览器，不在应用窗口内打开
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -1093,6 +1468,7 @@ function createWindow() {
     // 主窗口真正关闭（退出应用）时，桌面歌词悬浮窗要一并关掉，
     // 否则它会作为仅存的窗口阻止 window-all-closed 触发、应用退不出去。
     closeDesktopLyricsWindow();
+    closeMiniWindow();
   });
 
   // 「关闭到托盘」：真正退出（app.isQuitting）时才放行关闭。
@@ -1112,7 +1488,26 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
+/* 单实例锁：第二次双击（或双击关联的音频文件）不再开第二个进程，而是把已有窗口拉到前面。
+   以前两个实例会同时播放、同时写同一份配置，退出时后写的那份把另一份覆盖掉，
+   表现就是「改过的设置自己变回去了」。 */
+const singleInstance = app.requestSingleInstanceLock();
+if (!singleInstance) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const win = mainWindow || BrowserWindow.getAllWindows()[0];
+    if (!win) {
+      createWindow();
+      return;
+    }
+    if (win.isMinimized()) win.restore();
+    if (!win.isVisible()) win.show();
+    win.focus();
+  });
+}
+
+if (singleInstance) app.whenReady().then(() => {
   if (process.platform === 'win32') {
     Menu.setApplicationMenu(null);
   }
@@ -1139,7 +1534,6 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
-
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
